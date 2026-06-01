@@ -1,0 +1,3 @@
+[submodule "vendor/graphify"]
+	path = vendor/graphify
+	url = https://github.com/safishamsi/graphify

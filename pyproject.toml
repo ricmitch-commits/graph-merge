@@ -1,0 +1,37 @@
+[build-system]
+requires = ["setuptools>=68"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "graph-merge"
+version = "0.1.0"
+requires-python = ">=3.11"
+dependencies = [
+    "anthropic>=0.30",
+    "openai>=1.0",
+    "google-generativeai>=0.7",
+]
+
+[project.scripts]
+graph-merge = "cli:main"
+
+[tool.setuptools.packages.find]
+where = ["."]
+exclude = ["tests*", "vendor*", "docs*"]
+
+[tool.setuptools]
+py-modules = ["cli"]
+
+[project.optional-dependencies]
+dev = [
+    "pytest>=8.0",
+    "pytest-cov>=5.0",
+]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+addopts = "-v --tb=short"
+markers = [
+    "integration: requires fixture git repos",
+    "contract: requires external tools (graphify, real LLM API)",
+]
