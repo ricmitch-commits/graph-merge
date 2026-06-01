@@ -33,6 +33,9 @@ def create_client(model_spec: str) -> LLMClient:
     if provider == "gemini":
         from llm.gemini_client import GeminiClient
         return GeminiClient(model_id)
+    if provider == "vertex":
+        from llm.vertex_client import VertexClient
+        return VertexClient(model_id)
     raise ValueError(
-        f"Unknown provider '{provider}': expected claude, openai, or gemini"
+        f"Unknown provider '{provider}': expected claude, openai, gemini, or vertex"
     )

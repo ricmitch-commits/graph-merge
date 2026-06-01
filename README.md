@@ -83,13 +83,14 @@ graph-merge-out/
 
 ## Models supported
 
-| Provider | Format | Example |
-|----------|--------|---------|
-| Anthropic | `claude/<model-id>` | `claude/claude-opus-4-6` |
-| OpenAI | `openai/<model-id>` | `openai/gpt-4o` |
-| Gemini | `gemini/<model-id>` | `gemini/gemini-2.0-flash` |
+| Provider | Format | Example | Auth |
+|----------|--------|---------|------|
+| Anthropic | `claude/<model-id>` | `claude/claude-opus-4-6` | `ANTHROPIC_API_KEY` |
+| OpenAI | `openai/<model-id>` | `openai/gpt-4o` | `OPENAI_API_KEY` |
+| Google AI Studio | `gemini/<model-id>` | `gemini/gemini-2.0-flash` | `GOOGLE_API_KEY` |
+| Google Vertex AI | `vertex/<model-id>` | `vertex/gemini-2.0-flash` | `gcloud auth application-default login` |
 
-Set the relevant API key (`ANTHROPIC_API_KEY`, `OPENAI_API_KEY`, `GOOGLE_API_KEY`) before running.
+**Vertex AI:** set `VERTEX_PROJECT` (GCP project ID) and optionally `VERTEX_LOCATION` (default: `us-central1`).
 
 ## Development
 

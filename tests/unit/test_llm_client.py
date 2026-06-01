@@ -30,3 +30,13 @@ def test_create_client_accepts_valid_spec_format():
     # Should not raise — provider is recognised even if SDK not configured
     client = create_client("claude/claude-opus-4-6")
     assert hasattr(client, "complete")
+
+
+def test_create_client_accepts_vertex_spec():
+    client = create_client("vertex/gemini-2.0-flash")
+    assert hasattr(client, "complete")
+
+
+def test_create_client_vertex_rejects_missing_model_id():
+    with pytest.raises(ValueError, match="Invalid model spec"):
+        create_client("vertex")
