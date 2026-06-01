@@ -96,15 +96,20 @@ def generate_graph(worktree_path: Path, output_path: Path, label: str) -> None:
             )
         raise RuntimeError(f"Graphify failed:\n{stderr}")
 
-    # Make source_file paths relative to the worktree so they're portable
+    # Graphify may print progress lines before the JSON object; skip them.
+    raw = result.stdout
+    json_start = raw.find("{")
+    if json_start == -1:
+        raise RuntimeError(
+            f"Graphify produced no JSON object in its output.\n"
+            f"stdout preview: {raw[:300]!r}"
+        )
     try:
-        data = json.loads(result.stdout)
+        data = json.loads(raw[json_start:])
     except json.JSONDecodeError as exc:
-        preview = repr(result.stdout[:300])
         raise RuntimeError(
             f"Graphify produced invalid JSON: {exc}\n"
-            f"stdout preview: {preview}\n"
-            f"stderr: {result.stderr.strip()[:300]}"
+            f"stdout preview: {raw[json_start:json_start + 300]!r}"
         )
     worktree_abs = str(worktree_path.resolve())
     for node in data.get("nodes", []):
