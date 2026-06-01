@@ -91,7 +91,7 @@ graph-merge-out/
 | Google Vertex AI (Gemini) | `vertex/<model-id>` | `vertex/gemini-2.0-flash` | `gcloud auth application-default login` |
 | Google Vertex AI (Claude) | `vertex/<model-id>` | `vertex/claude-opus-4-6` | `gcloud auth application-default login` |
 
-**Vertex AI:** set `VERTEX_PROJECT_ID` (GCP project ID) and optionally `VERTEX_LOCATION` (default: `us-central1`).
+**Vertex AI:** set `VERTEX_PROJECT_ID` (GCP project ID) and optionally `VERTEX_REGION` (default: `us-central1`).
 Claude models on Vertex are detected by the `claude-` prefix and routed through `AnthropicVertex` automatically.
 
 ## Development

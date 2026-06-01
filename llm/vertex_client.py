@@ -6,7 +6,7 @@ class VertexClient:
 
     Environment variables:
       VERTEX_PROJECT_ID   - GCP project ID (required)
-      VERTEX_LOCATION  - GCP region (default: us-central1)
+      VERTEX_REGION  - GCP region (default: us-central1)
 
     Model routing:
       vertex/gemini-*  → vertexai.generative_models.GenerativeModel
@@ -19,7 +19,7 @@ class VertexClient:
     def complete(self, prompt: str) -> str:
         import os
         project = os.environ.get("VERTEX_PROJECT_ID")
-        location = os.environ.get("VERTEX_LOCATION", "us-central1")
+        location = os.environ.get("VERTEX_REGION", "us-central1")
 
         if self._model_id.startswith("claude"):
             return self._complete_claude(prompt, project, location)
