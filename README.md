@@ -88,9 +88,11 @@ graph-merge-out/
 | Anthropic | `claude/<model-id>` | `claude/claude-opus-4-6` | `ANTHROPIC_API_KEY` |
 | OpenAI | `openai/<model-id>` | `openai/gpt-4o` | `OPENAI_API_KEY` |
 | Google AI Studio | `gemini/<model-id>` | `gemini/gemini-2.0-flash` | `GOOGLE_API_KEY` |
-| Google Vertex AI | `vertex/<model-id>` | `vertex/gemini-2.0-flash` | `gcloud auth application-default login` |
+| Google Vertex AI (Gemini) | `vertex/<model-id>` | `vertex/gemini-2.0-flash` | `gcloud auth application-default login` |
+| Google Vertex AI (Claude) | `vertex/<model-id>` | `vertex/claude-opus-4-6` | `gcloud auth application-default login` |
 
 **Vertex AI:** set `VERTEX_PROJECT` (GCP project ID) and optionally `VERTEX_LOCATION` (default: `us-central1`).
+Claude models on Vertex are detected by the `claude-` prefix and routed through `AnthropicVertex` automatically.
 
 ## Development
 

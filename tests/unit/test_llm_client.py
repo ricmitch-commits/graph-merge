@@ -40,3 +40,8 @@ def test_create_client_accepts_vertex_spec():
 def test_create_client_vertex_rejects_missing_model_id():
     with pytest.raises(ValueError, match="Invalid model spec"):
         create_client("vertex")
+
+
+def test_create_client_vertex_claude_spec():
+    client = create_client("vertex/claude-opus-4-6")
+    assert hasattr(client, "complete")
