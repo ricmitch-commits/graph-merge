@@ -31,11 +31,11 @@ def setup_worktrees(
     created: list[tuple[Path, Path]] = []
 
     try:
-        _add_worktree(source_local, paths["before"], source_before)
+        _add_worktree(source_local, paths["before"], _resolve_ref(source_local, source_before))
         created.append((source_local, paths["before"]))
-        _add_worktree(source_local, paths["after"], source_after)
+        _add_worktree(source_local, paths["after"], _resolve_ref(source_local, source_after))
         created.append((source_local, paths["after"]))
-        _add_worktree(dest_local, paths["dest"], dest_base)
+        _add_worktree(dest_local, paths["dest"], _resolve_ref(dest_local, dest_base))
         created.append((dest_local, paths["dest"]))
     except RuntimeError:
         for repo, path in created:
@@ -66,6 +66,19 @@ def _ensure_local(repo: str, clone_target: Path) -> Path:
             subprocess.run(["git", "clone", repo, str(clone_target)], check=True)
         return clone_target
     return Path(repo)
+
+
+def _resolve_ref(repo: Path, ref: str) -> str:
+    """Resolve a git revision expression (e.g. HEAD^, abc123^) to a full commit SHA."""
+    result = subprocess.run(
+        ["git", "-C", str(repo), "rev-parse", "--verify", ref],
+        capture_output=True, text=True,
+    )
+    if result.returncode != 0:
+        raise RuntimeError(
+            f"Cannot resolve ref {ref!r} in {repo}:\n{result.stderr.strip()}"
+        )
+    return result.stdout.strip()
 
 
 def _prune_worktrees(repo: Path) -> None:
