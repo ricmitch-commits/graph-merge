@@ -97,7 +97,15 @@ def generate_graph(worktree_path: Path, output_path: Path, label: str) -> None:
         raise RuntimeError(f"Graphify failed:\n{stderr}")
 
     # Make source_file paths relative to the worktree so they're portable
-    data = json.loads(result.stdout)
+    try:
+        data = json.loads(result.stdout)
+    except json.JSONDecodeError as exc:
+        preview = repr(result.stdout[:300])
+        raise RuntimeError(
+            f"Graphify produced invalid JSON: {exc}\n"
+            f"stdout preview: {preview}\n"
+            f"stderr: {result.stderr.strip()[:300]}"
+        )
     worktree_abs = str(worktree_path.resolve())
     for node in data.get("nodes", []):
         sf = node.get("source_file", "")
