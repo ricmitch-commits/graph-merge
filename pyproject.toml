@@ -10,6 +10,7 @@ dependencies = [
     "anthropic>=0.30",
     "openai>=1.0",
     "google-generativeai>=0.7",
+    "graphifyy",
 ]
 
 [project.scripts]

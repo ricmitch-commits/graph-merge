@@ -1,9 +1,23 @@
 import json
-import shutil
+import os
 import subprocess
+import sys
 from pathlib import Path
 
 from models.types import GraphEdge, GraphNode
+
+# Vendored Graphify lives at <repo-root>/vendor/graphify
+_VENDOR_GRAPHIFY = Path(__file__).parent.parent / "vendor" / "graphify"
+
+
+def _graphify_env() -> dict:
+    """Build an environment that makes the vendored Graphify importable."""
+    env = os.environ.copy()
+    paths = [str(_VENDOR_GRAPHIFY)]
+    if existing := env.get("PYTHONPATH"):
+        paths.append(existing)
+    env["PYTHONPATH"] = os.pathsep.join(paths)
+    return env
 
 
 def load_graph(graph_path: Path) -> tuple[dict[str, GraphNode], list[GraphEdge]]:
@@ -34,14 +48,40 @@ def load_graph(graph_path: Path) -> tuple[dict[str, GraphNode], list[GraphEdge]]
 
 
 def _parse_node(node_id: str, data: dict) -> GraphNode:
-    known = {"id", "file", "symbol", "name", "kind", "type", "calls", "imports", "properties"}
+    # Handle both our fixture schema and real Graphify output schema.
+    # Graphify uses: label, source_file, source_location, file_type
+    # Our fixtures use: file, symbol, kind, calls, imports, properties
+    label = data.get("label", "")
+    source_file = data.get("source_file", data.get("file", ""))
+
+    # Derive symbol: strip trailing "()" from Graphify function labels
+    symbol = data.get("symbol", data.get("name", ""))
+    if not symbol and label:
+        symbol = label.rstrip("()").strip().rstrip("(").strip()
+
+    # Derive kind from label suffix or explicit field
+    kind = data.get("kind", data.get("type", ""))
+    if not kind and label:
+        if label.endswith("()"):
+            kind = "function"
+        elif label.endswith((".py", ".go", ".js", ".ts", ".java", ".c", ".cpp", ".rs")):
+            kind = "module"
+
+    # Node id: prefer explicit id field over the key passed in
+    nid = data.get("id", node_id) or node_id
+
+    known = {
+        "id", "file", "symbol", "name", "kind", "type", "calls", "imports", "properties",
+        "label", "source_file", "source_location", "file_type", "weight",
+    }
     explicit_props = data.get("properties", {})
     extra_props = {k: v for k, v in data.items() if k not in known}
+
     return GraphNode(
-        id=node_id or data.get("id", ""),
-        file=data.get("file", ""),
-        symbol=data.get("symbol", data.get("name", "")),
-        kind=data.get("kind", data.get("type", "")),
+        id=nid,
+        file=source_file,
+        symbol=symbol,
+        kind=kind,
         calls=data.get("calls", []),
         imports=data.get("imports", []),
         properties={**explicit_props, **extra_props},
@@ -49,32 +89,35 @@ def _parse_node(node_id: str, data: dict) -> GraphNode:
 
 
 def generate_graph(worktree_path: Path, output_path: Path, label: str) -> None:
-    output_path.parent.mkdir(parents=True, exist_ok=True)
-    result = subprocess.run(
-        ["python", "-m", "graphify.extract", str(worktree_path),
-         "--output", str(output_path), "--no-html"],
-        capture_output=True, text=True,
-    )
-    if result.returncode == 0:
-        return
+    """Run Graphify on worktree_path and write the JSON graph to output_path.
 
-    if "--no-html" in result.stderr or "unrecognized arguments" in result.stderr:
-        result2 = subprocess.run(
-            ["python", "-m", "graphify.extract", str(worktree_path)],
-            capture_output=True, text=True, cwd=worktree_path,
-        )
-        if result2.returncode != 0:
-            raise RuntimeError(f"Graphify failed:\n{result2.stderr}")
-        graphify_out = worktree_path / "graphify-out"
-        src = graphify_out / "graph.json"
-        if not src.exists():
-            raise RuntimeError("Graphify ran but did not produce graph.json")
-        shutil.copy(src, output_path)
-        report_src = graphify_out / "GRAPH_REPORT.md"
-        if report_src.exists():
-            shutil.copy(report_src, output_path.parent / f"{label}_report.md")
-    else:
-        raise RuntimeError(f"Graphify failed:\n{result.stderr}")
+    Graphify writes its output to stdout; source_file paths in the output are
+    absolute (rooted at worktree_path) and are made relative before saving.
+    """
+    output_path.parent.mkdir(parents=True, exist_ok=True)
+    env = _graphify_env()
+    py = sys.executable
+
+    result = subprocess.run(
+        [py, "-m", "graphify.extract", str(worktree_path.resolve())],
+        capture_output=True, text=True, env=env,
+    )
+    if result.returncode != 0:
+        raise RuntimeError(f"Graphify failed:\n{result.stderr.strip()}")
+
+    # Make source_file paths relative to the worktree so they're portable
+    data = json.loads(result.stdout)
+    worktree_abs = str(worktree_path.resolve())
+    for node in data.get("nodes", []):
+        sf = node.get("source_file", "")
+        if sf.startswith(worktree_abs):
+            node["source_file"] = sf[len(worktree_abs):].lstrip("/")
+    for edge in data.get("edges", []):
+        sf = edge.get("source_file", "")
+        if sf.startswith(worktree_abs):
+            edge["source_file"] = sf[len(worktree_abs):].lstrip("/")
+
+    output_path.write_text(json.dumps(data, indent=2))
 
 
 def discover_and_write_schema(graph_path: Path, schema_doc_path: Path) -> None:
