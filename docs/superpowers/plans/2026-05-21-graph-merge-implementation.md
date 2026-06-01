@@ -19,7 +19,7 @@ graph-merge/
 │   ├── __init__.py
 │   ├── runner.py                   stage orchestrator; artifact skipping; error.log
 │   ├── checkout.py                 stage 1 — git clone + worktree management + atexit
-│   ├── graph.py                    stage 2 — Graphify subprocess + graph.json loading
+│   ├── graph.py                    stage 2 — Graphify subprocess + graph.json loading + schema discovery
 │   ├── diff.py                     stage 3 — pure-Python semantic diff algorithm
 │   ├── pruning.py                  context pruning for LLM (split out for testability)
 │   ├── mapper.py                   stage 4 — LLM prompt + response parsing
@@ -35,17 +35,25 @@ graph-merge/
 │   ├── openai_client.py
 │   └── gemini_client.py
 ├── tests/
-│   ├── conftest.py                 shared fixtures (tmp_path helpers)
+│   ├── conftest.py                 session-scoped helpers (tmp_path utilities)
 │   ├── unit/
+│   │   ├── __init__.py
 │   │   ├── test_types.py
+│   │   ├── test_cli.py
+│   │   ├── test_graph_loading.py
 │   │   ├── test_diff.py
 │   │   ├── test_pruning.py
-│   │   └── test_cli.py
+│   │   ├── test_runner.py
+│   │   ├── test_render.py
+│   │   ├── test_llm_client.py
+│   │   └── test_checkout.py
 │   ├── integration/
-│   │   ├── conftest.py             fixture git repos + mock graphify
+│   │   ├── __init__.py
+│   │   ├── conftest.py             fixture git repos + sequenced mock LLM
 │   │   └── test_pipeline.py        BDD scenarios (Given/When/Then)
 │   ├── contract/
-│   │   ├── test_llm_parsing.py     retry logic, bad JSON, partial JSON
+│   │   ├── __init__.py
+│   │   ├── test_llm_parsing.py     retry logic, bad JSON
 │   │   └── test_graphify_output.py parse real Graphify output into dataclasses
 │   └── fixtures/
 │       ├── graphs/
@@ -54,12 +62,11 @@ graph-merge/
 │       │   └── dest.json
 │       └── responses/
 │           ├── mapping_valid.json
-│           ├── mapping_invalid.json
-│           └── mapping_partial.json
+│           └── mapping_invalid.json
 ├── vendor/
 │   └── graphify/                   git submodule (pinned)
 ├── docs/
-│   ├── graph_schema.md             auto-generated on first run
+│   ├── graph_schema.md             auto-generated on first run (gitignored initially)
 │   └── superpowers/
 │       ├── specs/
 │       └── plans/
@@ -76,7 +83,7 @@ graph-merge/
 - Create: `pyproject.toml`
 - Create: `cli.py` (stub)
 - Create: `pipeline/__init__.py`, `models/__init__.py`, `llm/__init__.py`
-- Create: `tests/__init__.py`, `tests/unit/__init__.py`, `tests/integration/__init__.py`, `tests/contract/__init__.py`
+- Create: `tests/__init__.py`, `tests/conftest.py`, `tests/unit/__init__.py`, `tests/integration/__init__.py`, `tests/contract/__init__.py`
 - Create: `.gitmodules`
 
 - [ ] **Step 1: Create `pyproject.toml`**
@@ -114,7 +121,7 @@ markers = [
 ]
 ```
 
-- [ ] **Step 2: Create package `__init__.py` files and stub `cli.py`**
+- [ ] **Step 2: Create package `__init__.py` files, stub `cli.py`, and shared `tests/conftest.py`**
 
 Create empty `__init__.py` in `pipeline/`, `models/`, `llm/`, `tests/`, `tests/unit/`, `tests/integration/`, `tests/contract/`.
 
@@ -125,6 +132,12 @@ def main() -> None:
 
 if __name__ == "__main__":
     main()
+```
+
+```python
+# tests/conftest.py
+# Shared session-scoped helpers for all test layers.
+# Integration-specific fixtures live in tests/integration/conftest.py.
 ```
 
 - [ ] **Step 3: Add Graphify as a git submodule**
@@ -213,7 +226,7 @@ def test_mapping_result_fields():
 def test_config_output_dir_is_path():
     config = Config(
         source_repo="/tmp/src", source_before="abc^", source_after="abc",
-        dest_repo="/tmp/dest", dest_base="main", model="claude/claude-opus-4-7",
+        dest_repo="/tmp/dest", dest_base="main", model="claude/claude-opus-4-6",
         output_dir=Path("/tmp/out"), commit_message="", max_context_nodes=500,
         keep_worktrees=False, from_stage=None, force_stage=None,
     )
@@ -333,7 +346,7 @@ class Config:
 pytest tests/unit/test_types.py -v
 ```
 
-Expected: `5 passed`
+Expected: `6 passed`
 
 - [ ] **Step 6: Commit**
 
@@ -348,6 +361,7 @@ git commit -m "feat: add data model dataclasses and Config"
 
 **Files:**
 - Create: `llm/client.py`
+- Create: `llm/anthropic_client.py`, `llm/openai_client.py`, `llm/gemini_client.py`
 - Create: `tests/unit/test_llm_client.py`
 
 - [ ] **Step 1: Write the failing test**
@@ -384,8 +398,7 @@ def test_create_client_rejects_missing_model_id():
 
 def test_create_client_accepts_valid_spec_format():
     # Should not raise — provider is recognised even if SDK not configured
-    # We can't call complete() without real credentials, so just check construction
-    client = create_client("claude/claude-opus-4-7")
+    client = create_client("claude/claude-opus-4-6")
     assert hasattr(client, "complete")
 ```
 
@@ -440,15 +453,7 @@ def create_client(model_spec: str) -> LLMClient:
     )
 ```
 
-- [ ] **Step 4: Run tests**
-
-```bash
-pytest tests/unit/test_llm_client.py -v
-```
-
-Expected: `5 passed` (the `create_client` test may error on import if `anthropic` is not installed — install with `pip install anthropic` or stub the import; see Step 5.)
-
-- [ ] **Step 5: Create provider stubs** (prevents ImportError in tests)
+- [ ] **Step 4: Create provider stubs**
 
 ```python
 # llm/anthropic_client.py
@@ -496,7 +501,7 @@ class GeminiClient:
         return response.text
 ```
 
-- [ ] **Step 6: Run all tests**
+- [ ] **Step 5: Run all unit tests**
 
 ```bash
 pytest tests/unit/ -v
@@ -504,7 +509,7 @@ pytest tests/unit/ -v
 
 Expected: all pass.
 
-- [ ] **Step 7: Commit**
+- [ ] **Step 6: Commit**
 
 ```bash
 git add llm/ tests/unit/test_llm_client.py
@@ -534,7 +539,7 @@ def test_source_fix_commit_expands_to_before_after():
         "--source-fix-commit", "abc1234",
         "--dest-repo", "/dest",
         "--dest-base", "main",
-        "--model", "claude/claude-opus-4-7",
+        "--model", "claude/claude-opus-4-6",
     ])
     args = validate_args(args)
     assert args.source_before == "abc1234^"
@@ -549,7 +554,7 @@ def test_explicit_before_after_accepted():
         "--source-after", "abc1234",
         "--dest-repo", "/dest",
         "--dest-base", "main",
-        "--model", "claude/claude-opus-4-7",
+        "--model", "claude/claude-opus-4-6",
     ])
     args = validate_args(args)
     assert args.source_before == "abc1234^"
@@ -564,7 +569,7 @@ def test_source_fix_commit_and_before_are_mutually_exclusive():
         "--source-before", "abc^",
         "--dest-repo", "/dest",
         "--dest-base", "main",
-        "--model", "claude/claude-opus-4-7",
+        "--model", "claude/claude-opus-4-6",
     ])
     with pytest.raises(SystemExit):
         validate_args(args)
@@ -576,7 +581,7 @@ def test_missing_both_source_refs_raises():
         "--source-repo", "/src",
         "--dest-repo", "/dest",
         "--dest-base", "main",
-        "--model", "claude/claude-opus-4-7",
+        "--model", "claude/claude-opus-4-6",
     ])
     with pytest.raises(SystemExit):
         validate_args(args)
@@ -589,7 +594,7 @@ def test_default_output_dir():
         "--source-fix-commit", "abc",
         "--dest-repo", "/dest",
         "--dest-base", "main",
-        "--model", "claude/claude-opus-4-7",
+        "--model", "claude/claude-opus-4-6",
     ])
     assert args.output == "./graph-merge-out"
 
@@ -601,7 +606,7 @@ def test_max_context_nodes_default():
         "--source-fix-commit", "abc",
         "--dest-repo", "/dest",
         "--dest-base", "main",
-        "--model", "claude/claude-opus-4-7",
+        "--model", "claude/claude-opus-4-6",
     ])
     assert args.max_context_nodes == 500
 ```
@@ -716,7 +721,7 @@ git commit -m "feat: implement CLI argument parsing and --source-fix-commit expa
 
 ---
 
-## Task 5: Graph JSON Loading
+## Task 5: Graph JSON Loading and Schema Discovery
 
 **Files:**
 - Create: `pipeline/graph.py`
@@ -792,7 +797,7 @@ git commit -m "feat: implement CLI argument parsing and --source-fix-commit expa
 # tests/unit/test_graph_loading.py
 from pathlib import Path
 import pytest
-from pipeline.graph import load_graph
+from pipeline.graph import load_graph, discover_and_write_schema
 from models.types import GraphNode, GraphEdge
 
 FIXTURES = Path(__file__).parent.parent / "fixtures" / "graphs"
@@ -835,6 +840,22 @@ def test_load_graph_dest():
     nodes, edges = load_graph(FIXTURES / "dest.json")
     assert "internal/auth/service.go::ValidateToken" in nodes
     assert len(edges) == 1
+
+
+def test_discover_and_write_schema_creates_file(tmp_path):
+    schema_path = tmp_path / "graph_schema.md"
+    discover_and_write_schema(FIXTURES / "before.json", schema_path)
+    assert schema_path.exists()
+    content = schema_path.read_text()
+    assert "Node Fields" in content
+    assert "id" in content
+
+
+def test_discover_and_write_schema_skips_if_exists(tmp_path):
+    schema_path = tmp_path / "graph_schema.md"
+    schema_path.write_text("existing content")
+    discover_and_write_schema(FIXTURES / "before.json", schema_path)
+    assert schema_path.read_text() == "existing content"
 ```
 
 - [ ] **Step 3: Run to verify failure**
@@ -923,6 +944,35 @@ def generate_graph(worktree_path: Path, output_path: Path, label: str) -> None:
             shutil.copy(report_src, output_path.parent / f"{label}_report.md")
     else:
         raise RuntimeError(f"Graphify failed:\n{result.stderr}")
+
+
+def discover_and_write_schema(graph_path: Path, schema_doc_path: Path) -> None:
+    """Infer node and edge fields from a real Graphify output and write docs/graph_schema.md.
+
+    Skipped if the file already exists; called once from runner._stage2.
+    """
+    if schema_doc_path.exists():
+        return
+    nodes, edges = load_graph(graph_path)
+    if not nodes:
+        return
+
+    sample_node = next(iter(nodes.values()))
+    node_fields = list(vars(sample_node).keys())
+    edge_fields = list(vars(edges[0]).keys()) if edges else []
+
+    schema_doc_path.parent.mkdir(parents=True, exist_ok=True)
+    schema_doc_path.write_text(
+        "# graph.json Schema\n\n"
+        "_Auto-generated from first successful Graphify run._\n\n"
+        "## Node Fields\n"
+        + "\n".join(f"- `{f}`" for f in node_fields)
+        + "\n\n## Edge Fields\n"
+        + "\n".join(f"- `{f}`" for f in edge_fields)
+        + "\n\n## Sample Node\n\n```json\n"
+        + json.dumps(vars(sample_node), indent=2)
+        + "\n```\n"
+    )
 ```
 
 - [ ] **Step 5: Run tests**
@@ -931,14 +981,14 @@ def generate_graph(worktree_path: Path, output_path: Path, label: str) -> None:
 pytest tests/unit/test_graph_loading.py -v
 ```
 
-Expected: `5 passed`
+Expected: `7 passed`
 
 - [ ] **Step 6: Commit**
 
 ```bash
 git add pipeline/graph.py pipeline/__init__.py tests/unit/test_graph_loading.py \
         tests/fixtures/graphs/
-git commit -m "feat: implement graph JSON loading and Graphify invocation"
+git commit -m "feat: implement graph JSON loading, Graphify invocation, and schema discovery"
 ```
 
 ---
@@ -1022,9 +1072,8 @@ def test_commit_message_preserved():
     assert result.commit_message == "fix: add warning for invalid token"
 
 
-def test_fallback_match_by_file_symbol_kind(tmp_path):
-    """If node IDs differ between before/after but (file, symbol, kind) match,
-    the node should be treated as modified rather than removed+added."""
+def test_fallback_match_by_file_symbol_kind():
+    """Nodes with differing IDs but matching (file, symbol, kind) → node_modified, not removed+added."""
     from models.types import GraphNode
     before_nodes = {
         "old-id-1": GraphNode(id="old-id-1", file="src/auth.py",
@@ -1054,7 +1103,6 @@ Expected: `ModuleNotFoundError: No module named 'pipeline.diff'`
 - [ ] **Step 3: Implement `pipeline/diff.py`**
 
 ```python
-import re
 from models.types import Change, GraphEdge, GraphNode, SemanticDiff
 
 _RATIONALE_KEYS = {"why", "hack", "note", "fixme"}
@@ -1067,7 +1115,6 @@ def compute_semantic_diff(
     after_edges: list[GraphEdge],
     commit_message: str = "",
 ) -> SemanticDiff:
-    # Remap IDs if not stable across runs
     id_map = _build_fallback_id_map(before_nodes, after_nodes)
     remapped_before = {id_map.get(k, k): v for k, v in before_nodes.items()}
 
@@ -1221,7 +1268,6 @@ def test_god_nodes_excluded():
 
 def test_hard_cap_drops_lowest_degree_nodes():
     nodes = {f"n{i}": _make_node(f"n{i}", "validate_token") for i in range(10)}
-    # n0 has 5 edges (high degree), others have 1
     edges = [_make_edge("n0", f"n{i}") for i in range(1, 6)]
     edges += [_make_edge(f"n{i}", f"x{i}") for i in range(6, 10)]
     all_nodes = {**nodes, **{f"x{i}": _make_node(f"x{i}", "other") for i in range(6, 10)}}
@@ -1283,7 +1329,7 @@ def prune_graph(
     }
 
     within_2_hops = _bfs(seeds, adj, max_hops=2)
-    kept = {nid: nodes[nid] for nid in within_2_hops if nid not in god_nodes}
+    kept = {nid: nodes[nid] for nid in within_2_hops if nid not in god_nodes and nid in nodes}
 
     if len(kept) > max_nodes:
         degrees = {nid: len(adj.get(nid, set())) for nid in kept}
@@ -1347,6 +1393,12 @@ git commit -m "feat: implement context pruning (2-hop BFS, god node exclusion, h
 - Create: `pipeline/runner.py`
 - Create: `tests/unit/test_runner.py`
 
+**Key implementation notes:**
+- `_stage4` must deserialize edge-type `Change` objects: the JSON `edge` field is a nested dict that must be reconstructed as `GraphEdge` before passing to `Change()`
+- Exit codes are 0, 1, 2 only — stage 5 exceptions are exit 1, not a distinct code
+- `_stage5` all-unmappable path must write an empty `fix.patch` so subsequent runs correctly skip stage 5
+- `_stage2` wires the `discover_and_write_schema` call after graph generation
+
 - [ ] **Step 1: Write the failing test**
 
 ```python
@@ -1361,7 +1413,7 @@ from pipeline.runner import artifacts_exist, run_pipeline
 def _config(tmp_path: Path, from_stage=None, force_stage=None) -> Config:
     return Config(
         source_repo="/src", source_before="abc^", source_after="abc",
-        dest_repo="/dest", dest_base="main", model="claude/claude-opus-4-7",
+        dest_repo="/dest", dest_base="main", model="claude/claude-opus-4-6",
         output_dir=tmp_path, commit_message="", max_context_nodes=500,
         keep_worktrees=False, from_stage=from_stage, force_stage=force_stage,
     )
@@ -1387,9 +1439,15 @@ def test_artifacts_exist_stage4_true_when_mapping_present(tmp_path):
     assert artifacts_exist(tmp_path, 4)
 
 
+def test_artifacts_exist_stage5_requires_both_files(tmp_path):
+    (tmp_path / "FIX_PROPOSAL.md").write_text("")
+    assert not artifacts_exist(tmp_path, 5)   # fix.patch missing
+    (tmp_path / "fix.patch").write_text("")
+    assert artifacts_exist(tmp_path, 5)        # both present
+
+
 def test_stage_skipped_when_artifacts_exist(tmp_path):
     config = _config(tmp_path)
-    # Pre-create all artifacts so every stage is skipped
     for label in ("before", "after", "dest"):
         (tmp_path / "worktrees" / label).mkdir(parents=True)
     for label in ("before", "after", "dest"):
@@ -1418,14 +1476,26 @@ def test_force_stage_reruns_despite_artifact(tmp_path):
         called.append(3)
 
     with patch("pipeline.runner.STAGES", [(3, "Diff", fake_stage3)]):
-        # runner will error after stage 3 because other stages aren't set up
-        # We only care that stage 3 was called
         try:
             run_pipeline(config)
         except Exception:
             pass
 
     assert 3 in called
+
+
+def test_failed_stage_writes_error_log(tmp_path):
+    config = _config(tmp_path)
+
+    def bad_stage(c):
+        raise RuntimeError("something broke")
+
+    with patch("pipeline.runner.STAGES", [(1, "Checkout", bad_stage)]):
+        exit_code = run_pipeline(config)
+
+    assert exit_code == 1
+    assert (tmp_path / "error.log").exists()
+    assert "something broke" in (tmp_path / "error.log").read_text()
 ```
 
 - [ ] **Step 2: Run to verify failure**
@@ -1480,7 +1550,7 @@ def _stage1(config: Config) -> None:
 
 
 def _stage2(config: Config) -> None:
-    from pipeline.graph import generate_graph
+    from pipeline.graph import generate_graph, discover_and_write_schema
     graphs_dir = config.output_dir / "graphs"
     worktrees_dir = config.output_dir / "worktrees"
     for label in ("before", "after", "dest"):
@@ -1489,10 +1559,21 @@ def _stage2(config: Config) -> None:
             output_path=graphs_dir / f"{label}.json",
             label=label,
         )
+    # Write schema on first real run; skipped on subsequent runs if file exists
+    schema_path = Path("docs/graph_schema.md")
+    discover_and_write_schema(graphs_dir / "before.json", schema_path)
 
 
 class _NoChanges(Exception):
     pass
+
+
+def _deserialize_change(c: dict):
+    """Reconstruct a Change, handling the edge field as a nested GraphEdge dict."""
+    from models.types import Change, GraphEdge
+    edge_data = c.pop("edge", None)
+    edge = GraphEdge(**edge_data) if edge_data else None
+    return Change(**c, edge=edge)
 
 
 def _stage3(config: Config) -> None:
@@ -1509,12 +1590,13 @@ def _stage3(config: Config) -> None:
     if not diff.changes:
         print("Warning: no structural changes detected between source-before and source-after.")
         raise _NoChanges()
-    # Serialize: handle GraphEdge objects in edge-type changes
+
     def _serialize_change(c) -> dict:
         d = {k: v for k, v in vars(c).items() if v is not None and k != "edge"}
         if c.edge is not None:
             d["edge"] = vars(c.edge)
         return d
+
     out = {
         "commit_message": diff.commit_message,
         "changes": [_serialize_change(c) for c in diff.changes],
@@ -1527,14 +1609,14 @@ def _stage4(config: Config) -> None:
     from llm.client import create_client
     from pipeline.graph import load_graph
     from pipeline.mapper import run_mapping
+    from models.types import SemanticDiff
 
     graphs_dir = config.output_dir / "graphs"
-    _, _ = load_graph(graphs_dir / "before.json")   # validate it loads
     dest_nodes, dest_edges = load_graph(graphs_dir / "dest.json")
 
     diff_data = json.loads((config.output_dir / "semantic_diff.json").read_text())
-    from models.types import Change, SemanticDiff
-    changes = [Change(**c) for c in diff_data["changes"]]
+    # Edge-type changes carry a nested 'edge' dict that must be reconstructed as GraphEdge
+    changes = [_deserialize_change(dict(c)) for c in diff_data["changes"]]
     diff = SemanticDiff(commit_message=diff_data["commit_message"], changes=changes)
 
     llm = create_client(config.model)
@@ -1566,7 +1648,7 @@ def _stage4(config: Config) -> None:
 def _stage5(config: Config) -> None:
     import json
     from llm.client import create_client
-    from pipeline.render import run_render
+    from pipeline.render import run_render, build_fix_proposal
     from models.types import (
         Mapping, MappingResult, SourceChange, DestinationNode, UnmappableChange,
     )
@@ -1592,17 +1674,20 @@ def _stage5(config: Config) -> None:
 
     if not mappings:
         print("Warning: all changes were unmappable. Writing FIX_PROPOSAL.md with no patch.")
-        # Still write FIX_PROPOSAL.md so the user can see what was unmappable
-        from pipeline.render import build_fix_proposal
         proposal = build_fix_proposal(
             mapping_result=result,
             branch_name="(none — all changes unmappable)",
-            source_repo=config.source_repo, source_before_ref=config.source_before,
-            source_after_ref=config.source_after, dest_repo=config.dest_repo,
-            dest_base=config.dest_base, commit_message=config.commit_message,
+            source_repo=config.source_repo,
+            source_before_ref=config.source_before,
+            source_after_ref=config.source_after,
+            dest_repo=config.dest_repo,
+            dest_base=config.dest_base,
+            commit_message=config.commit_message,
         )
+        # Write both artifacts so stage 5 is correctly skipped on re-run
+        (config.output_dir / "fix.patch").write_text("")
         (config.output_dir / "FIX_PROPOSAL.md").write_text(proposal)
-        return   # exit 0
+        return
 
     llm = create_client(config.model)
     worktrees = {
@@ -1612,8 +1697,12 @@ def _stage5(config: Config) -> None:
     branch = run_render(
         mapping_result=result,
         worktrees=worktrees,
-        dest_repo_path=Path(config.dest_repo),
+        source_repo=config.source_repo,
+        source_before_ref=config.source_before,
         source_after_ref=config.source_after,
+        dest_repo=config.dest_repo,
+        dest_base=config.dest_base,
+        commit_message=config.commit_message,
         llm_client=llm,
         output_dir=config.output_dir,
     )
@@ -1651,13 +1740,13 @@ def run_pipeline(config: Config) -> int:
         try:
             stage_fn(config)
         except _NoChanges:
-            return 0   # stage 3: no structural changes detected — exit 0 with warning
+            return 0
         except ValueError as exc:
             _write_error_log(config.output_dir, stage_num, stage_name, exc)
             return 2
         except Exception as exc:
             _write_error_log(config.output_dir, stage_num, stage_name, exc)
-            return 1 if stage_num != 5 else 3
+            return 1
 
     return 0
 
@@ -1674,7 +1763,7 @@ def _write_error_log(output_dir: Path, stage_num: int, stage_name: str, exc: Exc
 pytest tests/unit/test_runner.py -v
 ```
 
-Expected: `7 passed`
+Expected: `8 passed`
 
 - [ ] **Step 5: Run full unit suite**
 
@@ -1688,7 +1777,7 @@ Expected: all pass.
 
 ```bash
 git add pipeline/runner.py tests/unit/test_runner.py
-git commit -m "feat: implement pipeline runner with per-stage artifact skipping"
+git commit -m "feat: implement pipeline runner with per-stage artifact skipping and edge deserialization"
 ```
 
 ---
@@ -1732,7 +1821,6 @@ def test_setup_worktrees_creates_three_directories(tmp_path):
     before_sha = subprocess.run(
         ["git", "rev-parse", "HEAD"], cwd=src, capture_output=True, text=True
     ).stdout.strip()
-    # Create a second commit for "after"
     (src / "fix.py").write_text("fixed")
     subprocess.run(["git", "add", "."], cwd=src, check=True, capture_output=True)
     subprocess.run(["git", "commit", "-m", "fix"], cwd=src, check=True, capture_output=True)
@@ -1908,7 +1996,7 @@ git commit -m "feat: implement stage 1 checkout with worktree management and ate
 ```
 
 ```
-// tests/fixtures/responses/mapping_invalid.json
+// tests/fixtures/responses/mapping_invalid.json  (intentionally not valid JSON)
 this is not json at all
 ```
 
@@ -1938,7 +2026,6 @@ def test_invalid_json_triggers_retry():
     bad_json = "not json"
     valid_json = (RESPONSES / "mapping_valid.json").read_text()
     client = MockLLMClient(response=valid_json)
-    # First call returns bad JSON, second call (via retry) returns valid JSON via client
     result = _parse_mapping_response(bad_json, client)
     assert client.call_count == 1   # one retry call was made
     assert len(result.mappings) == 1
@@ -1954,7 +2041,7 @@ def test_unmappable_source_change_has_no_type_required():
     raw = (RESPONSES / "mapping_valid.json").read_text()
     client = MockLLMClient(response=raw)
     result = _parse_mapping_response(raw, client)
-    # unmappable entries have no "type" field in source_change
+    # unmappable entries have no "type" field — SourceChange.type defaults to ""
     assert result.unmappable[0].source_change.type == ""
 ```
 
@@ -2050,8 +2137,7 @@ def run_mapping(
 
     response = llm_client.complete(prompt)
     raw_path = output_dir / "mapping_raw.txt"
-    result = _parse_mapping_response(response, llm_client, raw_path=raw_path)
-    return result
+    return _parse_mapping_response(response, llm_client, raw_path=raw_path)
 
 
 def _parse_mapping_response(
@@ -2116,6 +2202,11 @@ git commit -m "feat: implement stage 4 LLM fix mapping with JSON retry logic"
 **Files:**
 - Create: `pipeline/render.py`
 - Create: `tests/unit/test_render.py`
+
+**Key implementation notes:**
+- `run_render` receives source/dest repo metadata to pass through to `build_fix_proposal`; this avoids `FIX_PROPOSAL.md` showing empty or wrong repo/ref fields
+- All git operations (branch creation, commit) happen in `worktrees["dest"]`, not the original dest repo path
+- `generate_patch_content` is independently testable with a mock worktree and mock LLM
 
 - [ ] **Step 1: Write the failing test**
 
@@ -2189,6 +2280,19 @@ def test_fix_proposal_contains_unmappable_section():
     assert "No structural equivalent" in proposal
 
 
+def test_fix_proposal_source_and_dest_refs_present():
+    proposal = build_fix_proposal(
+        mapping_result=_mapping_result(),
+        branch_name="graph-merge/port-abc1234-20260521",
+        source_repo="/src", source_before_ref="abc^", source_after_ref="abc1234",
+        dest_repo="/dest", dest_base="main", commit_message="",
+    )
+    assert "/src" in proposal
+    assert "abc^" in proposal
+    assert "/dest" in proposal
+    assert "main" in proposal
+
+
 def test_patch_content_written_from_llm_response(tmp_path):
     after_dir = tmp_path / "after"
     dest_dir = tmp_path / "dest"
@@ -2250,20 +2354,25 @@ file content — no explanation, no markdown fences."""
 def run_render(
     mapping_result: MappingResult,
     worktrees: dict[str, Path],
-    dest_repo_path: Path,
+    source_repo: str,
+    source_before_ref: str,
     source_after_ref: str,
+    dest_repo: str,
+    dest_base: str,
+    commit_message: str,
     llm_client,
     output_dir: Path,
 ) -> str:
     new_contents = generate_patch_content(mapping_result, worktrees, llm_client)
 
+    dest_worktree = worktrees["dest"]
     for dest_file, content in new_contents.items():
-        dest_path = worktrees["dest"] / dest_file
+        dest_path = dest_worktree / dest_file
         dest_path.parent.mkdir(parents=True, exist_ok=True)
         dest_path.write_text(content)
 
     patch_result = subprocess.run(
-        ["git", "diff"], capture_output=True, text=True, cwd=str(worktrees["dest"])
+        ["git", "diff"], capture_output=True, text=True, cwd=str(dest_worktree)
     )
     unmappable_comment = ""
     if mapping_result.unmappable:
@@ -2278,24 +2387,26 @@ def run_render(
     timestamp = datetime.now().strftime("%Y%m%d")
     branch_name = f"graph-merge/port-{sha}-{timestamp}"
 
+    # Create branch and commit in the dest worktree; branch persists in the repo
+    # after the worktree is removed by the atexit handler
     subprocess.run(
         ["git", "checkout", "-b", branch_name],
-        cwd=str(dest_repo_path), check=True, capture_output=True,
+        cwd=str(dest_worktree), check=True, capture_output=True,
     )
     subprocess.run(
         ["git", "commit", "-am", f"graph-merge: port fix from {source_after_ref}"],
-        cwd=str(dest_repo_path), check=False, capture_output=True,
+        cwd=str(dest_worktree), check=False, capture_output=True,
     )
 
     proposal = build_fix_proposal(
         mapping_result=mapping_result,
         branch_name=branch_name,
-        source_repo=str(dest_repo_path),
-        source_before_ref="",
+        source_repo=source_repo,
+        source_before_ref=source_before_ref,
         source_after_ref=source_after_ref,
-        dest_repo=str(dest_repo_path),
-        dest_base="",
-        commit_message="",
+        dest_repo=dest_repo,
+        dest_base=dest_base,
+        commit_message=commit_message,
     )
     (output_dir / "FIX_PROPOSAL.md").write_text(proposal)
 
@@ -2390,7 +2501,7 @@ Branch: {branch_name}
 pytest tests/unit/test_render.py -v
 ```
 
-Expected: `4 passed`
+Expected: `5 passed`
 
 - [ ] **Step 5: Commit**
 
@@ -2407,6 +2518,11 @@ git commit -m "feat: implement stage 5 output rendering (patch, FIX_PROPOSAL.md,
 - Create: `tests/integration/conftest.py`
 - Create: `tests/integration/test_pipeline.py`
 
+**Key design notes:**
+- Stage 1 and 2 are bypassed by pre-creating worktrees and copying fixture graph files
+- The LLM is mocked with a `SequencedMockLLMClient` that returns different responses for successive calls — stage 4 gets mapping JSON, stage 5 gets Go file content
+- `create_client` is patched to always return the same sequenced mock instance so call ordering is deterministic across stages
+
 - [ ] **Step 1: Write `tests/integration/conftest.py`**
 
 ```python
@@ -2415,10 +2531,21 @@ import json
 import subprocess
 from pathlib import Path
 import pytest
-from llm.client import MockLLMClient
 
 FIXTURE_GRAPHS = Path(__file__).parent.parent / "fixtures" / "graphs"
 FIXTURE_RESPONSES = Path(__file__).parent.parent / "fixtures" / "responses"
+
+
+class SequencedMockLLMClient:
+    """Returns responses in order; repeats the last response once exhausted."""
+    def __init__(self, responses: list[str]) -> None:
+        self._responses = list(responses)
+        self.call_count = 0
+
+    def complete(self, prompt: str) -> str:
+        idx = min(self.call_count, len(self._responses) - 1)
+        self.call_count += 1
+        return self._responses[idx]
 
 
 def _init_repo(path: Path) -> None:
@@ -2478,22 +2605,16 @@ def go_dest_repo(tmp_path):
 
 
 @pytest.fixture
-def mock_llm_mapping():
-    return MockLLMClient(
-        response=(FIXTURE_RESPONSES / "mapping_valid.json").read_text()
+def sequenced_llm():
+    """LLM mock that serves mapping JSON for stage 4 then Go content for stage 5."""
+    mapping_json = (FIXTURE_RESPONSES / "mapping_valid.json").read_text()
+    go_content = (
+        "package auth\n\nfunc (s *Service) ValidateToken(token string) bool {\n"
+        "    result := s.db.QueryRow(token) != nil\n"
+        "    if !result { log.Warn(\"Invalid token\") }\n"
+        "    return result\n}\n"
     )
-
-
-@pytest.fixture
-def mock_llm_render():
-    return MockLLMClient(
-        response=(
-            "package auth\n\nfunc (s *Service) ValidateToken(token string) bool {\n"
-            "    result := s.db.QueryRow(token) != nil\n"
-            "    if !result { log.Warn(\"Invalid token\") }\n"
-            "    return result\n}\n"
-        )
-    )
+    return SequencedMockLLMClient([mapping_json, go_content])
 ```
 
 - [ ] **Step 2: Write `tests/integration/test_pipeline.py`**
@@ -2503,12 +2624,11 @@ def mock_llm_render():
 """
 Feature: Port a bug fix between codebases using code knowledge graphs
 
-These tests drive the full pipeline with:
+Tests drive stages 3-5 with:
   - Real git repos (fixture repos built in conftest.py)
   - Fixture graph JSON files (bypass real Graphify invocation)
-  - Mock LLM client (bypass real API calls)
+  - SequencedMockLLMClient (bypass real API calls)
 """
-import json
 import shutil
 from pathlib import Path
 from unittest.mock import patch
@@ -2522,14 +2642,14 @@ FIXTURE_GRAPHS = Path(__file__).parent.parent / "fixtures" / "graphs"
 pytestmark = pytest.mark.integration
 
 
-def _config(tmp_path, src_repo, before_sha, after_sha, go_repo, mock_llm_mapping, mock_llm_render):
+def _make_config(tmp_path, src_repo, before_sha, after_sha, go_repo) -> Config:
     return Config(
         source_repo=str(src_repo),
         source_before=before_sha,
         source_after=after_sha,
         dest_repo=str(go_repo),
         dest_base="HEAD",
-        model="claude/claude-opus-4-7",
+        model="claude/claude-opus-4-6",
         output_dir=tmp_path / "out",
         commit_message="fix: add warning for invalid token",
         max_context_nodes=500,
@@ -2546,55 +2666,52 @@ def _stub_graphs(output_dir: Path) -> None:
         shutil.copy(FIXTURE_GRAPHS / f"{label}.json", graphs_dir / f"{label}.json")
 
 
+def _make_worktrees(output_dir: Path, src_repo, before_sha, after_sha, go_repo) -> None:
+    from pipeline.checkout import setup_worktrees
+    setup_worktrees(
+        source_repo=str(src_repo),
+        source_before=before_sha,
+        source_after=after_sha,
+        dest_repo=str(go_repo),
+        dest_base="HEAD",
+        output_dir=output_dir,
+        keep_worktrees=True,
+    )
+
+
 @pytest.mark.integration
 class TestGraphMergePipeline:
 
-    def test_given_python_source_and_go_dest_when_pipeline_runs_then_fix_proposal_created(
-        self, python_source_repo, go_dest_repo, tmp_path,
-        mock_llm_mapping, mock_llm_render,
+    def test_given_python_source_and_go_dest_when_stages_3_to_5_run_then_proposal_created(
+        self, python_source_repo, go_dest_repo, tmp_path, sequenced_llm,
     ):
         """
         Scenario: Full pipeline produces FIX_PROPOSAL.md
           Given a Python source repo with a committed bug fix
           And a Go destination repo
-          When graph-merge stages 3-5 run (stages 1-2 bypassed via fixture graphs)
-          Then FIX_PROPOSAL.md exists in the output directory
-          And it contains at least one mapping
+          And fixture graph JSON files in place of real Graphify output
+          When graph-merge runs from stage 3
+          Then FIX_PROPOSAL.md exists with at least one mapping
+          And fix.patch exists
         """
         src_repo, before_sha, after_sha = python_source_repo
-        config = _config(
-            tmp_path, src_repo, before_sha, after_sha, go_dest_repo,
-            mock_llm_mapping, mock_llm_render,
-        )
+        config = _make_config(tmp_path, src_repo, before_sha, after_sha, go_dest_repo)
 
-        # Stage 1: create real worktrees
-        from pipeline.checkout import setup_worktrees
-        setup_worktrees(
-            source_repo=str(src_repo),
-            source_before=before_sha,
-            source_after=after_sha,
-            dest_repo=str(go_dest_repo),
-            dest_base="HEAD",
-            output_dir=config.output_dir,
-            keep_worktrees=True,
-        )
-
-        # Stage 2: stub with fixture graphs
+        _make_worktrees(config.output_dir, src_repo, before_sha, after_sha, go_dest_repo)
         _stub_graphs(config.output_dir)
+        config.from_stage = 3
 
-        with patch("pipeline.runner._stage1", lambda c: None), \
-             patch("pipeline.runner._stage2", lambda c: None), \
-             patch("pipeline.mapper.run_mapping", return_value=mock_llm_mapping) as mock_map, \
-             patch("llm.client.create_client", return_value=mock_llm_mapping):
-            # Re-run from stage 3
-            config.from_stage = 3
+        # create_client is called once per LLM stage; both calls return the same
+        # sequenced mock so stage 4 gets call 0 (mapping JSON) and stage 5 gets call 1 (Go)
+        with patch("llm.client.create_client", return_value=sequenced_llm):
             exit_code = run_pipeline(config)
 
         assert (config.output_dir / "FIX_PROPOSAL.md").exists()
+        assert (config.output_dir / "fix.patch").exists()
+        assert exit_code == 0
 
     def test_given_all_artifacts_exist_when_pipeline_runs_then_no_stages_execute(
         self, python_source_repo, go_dest_repo, tmp_path,
-        mock_llm_mapping, mock_llm_render,
     ):
         """
         Scenario: Stage skipping
@@ -2603,10 +2720,7 @@ class TestGraphMergePipeline:
           Then no stage functions are called
         """
         src_repo, before_sha, after_sha = python_source_repo
-        config = _config(
-            tmp_path, src_repo, before_sha, after_sha, go_dest_repo,
-            mock_llm_mapping, mock_llm_render,
-        )
+        config = _make_config(tmp_path, src_repo, before_sha, after_sha, go_dest_repo)
         out = config.output_dir
         out.mkdir(parents=True)
         for label in ("before", "after", "dest"):
@@ -2628,22 +2742,20 @@ class TestGraphMergePipeline:
 
         assert called == []
 
-    def test_given_partial_run_when_semantic_diff_deleted_and_rerun_then_stage3_reruns(
+    def test_given_partial_run_when_semantic_diff_absent_then_stage3_reruns(
         self, python_source_repo, go_dest_repo, tmp_path,
-        mock_llm_mapping, mock_llm_render,
     ):
         """
         Scenario: Re-run after deleting artifact resumes from correct stage
-          Given stages 1 and 2 artifacts exist
+          Given stage 1 and 2 artifacts exist
           And semantic_diff.json does not exist
           When graph-merge runs
-          Then stage 3 runs (and stages 1 and 2 are skipped)
+          Then stage 3 runs (producing semantic_diff.json)
+          And stages 1 and 2 are skipped
+          And stages 4 and 5 do not run (no mapping.json yet)
         """
         src_repo, before_sha, after_sha = python_source_repo
-        config = _config(
-            tmp_path, src_repo, before_sha, after_sha, go_dest_repo,
-            mock_llm_mapping, mock_llm_render,
-        )
+        config = _make_config(tmp_path, src_repo, before_sha, after_sha, go_dest_repo)
         out = config.output_dir
         out.mkdir(parents=True)
         for label in ("before", "after", "dest"):
@@ -2663,7 +2775,8 @@ class TestGraphMergePipeline:
 
         assert 1 not in called
         assert 2 not in called
-        assert 3 not in called  # stage 3 ran for real (not patched)
+        assert 4 not in called   # no mapping.json produced yet
+        assert 5 not in called
         assert (out / "semantic_diff.json").exists()
 ```
 
@@ -2673,7 +2786,7 @@ class TestGraphMergePipeline:
 pytest tests/integration/ -v -m integration
 ```
 
-Expected: `3 passed` (may require `--keep-worktrees` git worktree cleanup if re-run).
+Expected: `3 passed`
 
 - [ ] **Step 4: Commit**
 
@@ -2774,9 +2887,9 @@ pytest tests/ -v --cov=. --cov-report=term-missing \
 
 - [ ] **Step 2: Identify uncovered lines**
 
-Review the `MISS` column output. Typical gaps at this point:
+Review the `MISS` column. Typical gaps at this point:
 - `cli.py:main()` — needs a smoke test
-- `pipeline/runner.py` error log path
+- `pipeline/runner.py` error log path (already covered by `test_failed_stage_writes_error_log`)
 - `pipeline/checkout.py` URL clone path
 
 - [ ] **Step 3: Add missing coverage for `cli.py:main()`**
@@ -2792,7 +2905,7 @@ def test_main_calls_run_pipeline(tmp_path):
         "--source-fix-commit", "abc",
         "--dest-repo", str(tmp_path),
         "--dest-base", "main",
-        "--model", "claude/claude-opus-4-7",
+        "--model", "claude/claude-opus-4-6",
         "--output", str(tmp_path / "out"),
     ]), patch("pipeline.runner.run_pipeline", return_value=0) as mock_run, \
        patch("sys.exit") as mock_exit:
@@ -2802,25 +2915,7 @@ def test_main_calls_run_pipeline(tmp_path):
         mock_exit.assert_called_with(0)
 ```
 
-- [ ] **Step 4: Add missing coverage for error log path**
-
-```python
-# Add to tests/unit/test_runner.py
-def test_failed_stage_writes_error_log(tmp_path):
-    config = _config(tmp_path)
-
-    def bad_stage(c):
-        raise RuntimeError("something broke")
-
-    with patch("pipeline.runner.STAGES", [(1, "Checkout", bad_stage)]):
-        exit_code = run_pipeline(config)
-
-    assert exit_code == 1
-    assert (tmp_path / "error.log").exists()
-    assert "something broke" in (tmp_path / "error.log").read_text()
-```
-
-- [ ] **Step 5: Re-run and confirm coverage improved**
+- [ ] **Step 4: Re-run and confirm coverage improved**
 
 ```bash
 pytest tests/unit/ tests/integration/ -v --cov=. --cov-report=term-missing \
@@ -2829,7 +2924,7 @@ pytest tests/unit/ tests/integration/ -v --cov=. --cov-report=term-missing \
 
 Expected: coverage above 85% for all source files.
 
-- [ ] **Step 6: Commit**
+- [ ] **Step 5: Commit**
 
 ```bash
 git add tests/unit/test_cli.py tests/unit/test_runner.py
@@ -2838,53 +2933,14 @@ git commit -m "test: fill coverage gaps in cli.main() and runner error handling"
 
 ---
 
-## Task 15: README and Graph Schema Discovery
+## Task 15: README
 
 **Files:**
 - Create: `README.md`
-- Modify: `pipeline/graph.py` (add `discover_schema`)
 
-- [ ] **Step 1: Add schema discovery to `pipeline/graph.py`**
+**Note:** `discover_and_write_schema` is implemented in `pipeline/graph.py` (Task 5) and wired into `_stage2` in `pipeline/runner.py` (Task 8). No additional implementation here — only documentation.
 
-Add this function — called once when `docs/graph_schema.md` doesn't exist:
-
-```python
-def discover_and_write_schema(graph_path: Path, schema_doc_path: Path) -> None:
-    """Infer graph.json schema from a real Graphify output and write docs/graph_schema.md."""
-    if schema_doc_path.exists():
-        return
-    nodes, edges = load_graph(graph_path)
-    if not nodes:
-        return
-
-    sample_node = next(iter(nodes.values()))
-    node_fields = list(vars(sample_node).keys())
-    edge_fields = list(vars(edges[0]).keys()) if edges else []
-
-    schema_doc_path.parent.mkdir(parents=True, exist_ok=True)
-    schema_doc_path.write_text(
-        f"# graph.json Schema\n\n"
-        f"_Auto-generated from first successful Graphify run._\n\n"
-        f"## Node Fields\n"
-        + "\n".join(f"- `{f}`" for f in node_fields)
-        + f"\n\n## Edge Fields\n"
-        + "\n".join(f"- `{f}`" for f in edge_fields)
-        + "\n\n## Sample Node\n\n```json\n"
-        + __import__("json").dumps(vars(sample_node), indent=2)
-        + "\n```\n"
-    )
-```
-
-Call it from `_stage2` in `pipeline/runner.py` after graph generation:
-
-```python
-# In _stage2, after the generate_graph loop:
-from pipeline.graph import discover_and_write_schema
-schema_path = Path("docs/graph_schema.md")
-discover_and_write_schema(graphs_dir / "before.json", schema_path)
-```
-
-- [ ] **Step 2: Write `README.md`**
+- [ ] **Step 1: Write `README.md`**
 
 ```markdown
 # graph-merge
@@ -2914,7 +2970,7 @@ graph-merge \
   --source-fix-commit a1b2c3d \
   --dest-repo /path/to/go-service \
   --dest-base main \
-  --model claude/claude-opus-4-7
+  --model claude/claude-opus-4-6
 ```
 
 Or with explicit refs:
@@ -2940,7 +2996,7 @@ graph-merge \
 | `--source-after` | — | git ref for post-fix state (mutually exclusive with `--source-fix-commit`) |
 | `--dest-repo` | _required_ | Local path or remote git URL |
 | `--dest-base` | _required_ | Base branch/commit to create the fix branch from |
-| `--model` | _required_ | `<provider>/<model-id>` — e.g. `claude/claude-opus-4-7` |
+| `--model` | _required_ | `<provider>/<model-id>` — e.g. `claude/claude-opus-4-6` |
 | `--output` | `./graph-merge-out` | Output directory |
 | `--commit-message` | — | Optional fix description for LLM context |
 | `--pr-description` | — | Path to markdown file (alternative to `--commit-message`) |
@@ -2953,10 +3009,9 @@ graph-merge \
 
 | Code | Meaning |
 |------|---------|
-| 0 | Success, branch created |
-| 1 | Stage failure |
+| 0 | Success — branch created (or all changes unmappable — see FIX_PROPOSAL.md) |
+| 1 | A required stage failed |
 | 2 | LLM response unparseable after retry |
-| 3 | `git apply` failed; `fix.patch` written but branch not created |
 
 ## Output directory
 
@@ -2975,7 +3030,7 @@ graph-merge-out/
 
 | Provider | Format | Example |
 |----------|--------|---------|
-| Anthropic | `claude/<model-id>` | `claude/claude-opus-4-7` |
+| Anthropic | `claude/<model-id>` | `claude/claude-opus-4-6` |
 | OpenAI | `openai/<model-id>` | `openai/gpt-4o` |
 | Gemini | `gemini/<model-id>` | `gemini/gemini-2.0-flash` |
 
@@ -2989,7 +3044,7 @@ pytest tests/contract -v -m contract            # requires Graphify + real API k
 ```
 ```
 
-- [ ] **Step 3: Run full test suite one final time**
+- [ ] **Step 2: Run full test suite one final time**
 
 ```bash
 pytest tests/ -v -m "not contract"
@@ -2997,11 +3052,11 @@ pytest tests/ -v -m "not contract"
 
 Expected: all pass.
 
-- [ ] **Step 4: Commit**
+- [ ] **Step 3: Commit**
 
 ```bash
-git add README.md pipeline/graph.py pipeline/runner.py
-git commit -m "docs: add README and graph schema auto-discovery"
+git add README.md
+git commit -m "docs: add README"
 ```
 
 ---
@@ -3020,7 +3075,10 @@ Expected output (excerpt):
 usage: graph-merge [-h] --source-repo PATH|URL [--source-fix-commit SHA] ...
 ```
 
-- [ ] **Step 2: Run a dry-run with `--from-stage 5` against fixture artifacts**
+- [ ] **Step 2: Run a dry-run with pre-staged artifacts**
+
+Stage all artifacts so only stage 5 would run, then confirm it is also skipped once
+`fix.patch` and `FIX_PROPOSAL.md` are present:
 
 ```bash
 mkdir -p /tmp/gm-smoke/worktrees/{before,after,dest}
@@ -3028,11 +3086,23 @@ mkdir -p /tmp/gm-smoke/graphs
 cp tests/fixtures/graphs/before.json /tmp/gm-smoke/graphs/
 cp tests/fixtures/graphs/after.json /tmp/gm-smoke/graphs/
 cp tests/fixtures/graphs/dest.json /tmp/gm-smoke/graphs/
-echo '{"commit_message":"fix","changes":[]}' > /tmp/gm-smoke/semantic_diff.json
+echo '{"commit_message":"fix","changes":[{"type":"node_modified","node_id":"src/auth.py::validate_token","file":"src/auth.py","symbol":"validate_token","kind":"function"}]}' > /tmp/gm-smoke/semantic_diff.json
 cp tests/fixtures/responses/mapping_valid.json /tmp/gm-smoke/mapping.json
+touch /tmp/gm-smoke/fix.patch /tmp/gm-smoke/FIX_PROPOSAL.md
 ```
 
-The above pre-stages all artifacts so only stage 5 would run. Confirm stage 5 is skipped too once `fix.patch` and `FIX_PROPOSAL.md` exist.
+```bash
+graph-merge \
+  --source-repo /tmp \
+  --source-before HEAD^ \
+  --source-after HEAD \
+  --dest-repo /tmp \
+  --dest-base HEAD \
+  --model claude/claude-opus-4-6 \
+  --output /tmp/gm-smoke
+```
+
+Expected: `[stage N] Skipping ... (artifacts exist)` for all stages.
 
 - [ ] **Step 3: Run final full test suite with coverage report**
 
@@ -3046,7 +3116,7 @@ Expected: all pass, coverage ≥ 85%.
 
 ```bash
 git add -A
-git commit -m "chore: final wiring verification and smoke test artifacts"
+git commit -m "chore: final wiring verification"
 ```
 
 ---
@@ -3060,45 +3130,97 @@ Split work into four PRs, in order:
 | PR | Scope | Key review focus |
 |----|-------|-----------------|
 | PR 1 | Tasks 1–3 (scaffold, models, LLM client) | Type correctness, Protocol interface, mock fidelity |
-| PR 2 | Tasks 4–7 (CLI, runner, graph loading, diff) | Arg expansion logic, artifact skipping, ID fallback matching |
-| PR 3 | Tasks 8–11 (pruning, checkout, mapper, render) | atexit safety, 2-hop BFS correctness, prompt quality, patch generation |
-| PR 4 | Tasks 12–16 (tests, docs, final wiring) | BDD scenario completeness, contract test skip logic, README accuracy |
+| PR 2 | Tasks 4–7 (CLI, graph loading, diff, pruning) | Arg expansion logic, schema discovery, ID fallback matching |
+| PR 3 | Tasks 8–11 (runner, checkout, mapper, render) | Edge deserialization, atexit safety, git ops in worktrees["dest"], prompt quality |
+| PR 4 | Tasks 12–16 (tests, docs, final wiring) | BDD scenario completeness, sequenced mock correctness, README accuracy |
 
 ### Review Checklist
 
 **Security (NFR-1)**
-- [ ] `create_client()` only constructs a provider client after `--model` is explicitly passed — no default provider
-- [ ] No code is sent to an external service in stages 1–3
-- [ ] `atexit` cleanup does not read or write code — only removes worktree dirs
+- [ ] `create_client()` only constructs a provider client after `--model` is explicitly passed — no default provider, no fallback
+- [ ] No code is sent to an external service in stages 1–3 (pure git + subprocess + Python)
+- [ ] `atexit` cleanup does not read or write code — it only removes worktree directories
+- [ ] LLM prompts do not leak API keys or internal config into logged output
 
-**Correctness**
+**Correctness — CLI**
 - [ ] `--source-fix-commit` expansion: `args.source_before == f"{sha}^"` and `args.source_after == sha`
 - [ ] Mutual exclusivity of `--source-fix-commit` vs `--source-before`/`--source-after` enforced with `sys.exit(1)`
+- [ ] `args_to_config` reads `--pr-description` file content, not the path, into `commit_message`
+
+**Correctness — Runner**
 - [ ] Stage skipping: `force_stage` overrides artifact check; `from_stage` skips earlier stages entirely
-- [ ] Diff ID fallback: when `before_ids` and `after_ids` are disjoint but `(file, symbol, kind)` matches, result has `node_modified` not `node_added` + `node_removed`
-- [ ] `_parse_mapping_response`: exactly one retry, then raises `ValueError` (not silent failure)
+- [ ] Stage 5 skip requires BOTH `fix.patch` AND `FIX_PROPOSAL.md` to exist
+- [ ] All-unmappable path in `_stage5` writes an empty `fix.patch` so the next run skips stage 5
+- [ ] Exit codes are exactly 0, 1, 2 — no exit code 3
+- [ ] `_deserialize_change` reconstructs `GraphEdge` from the nested `edge` dict before building `Change`; without this, any `edge_added`/`edge_removed` change crashes stage 4
+
+**Correctness — Diff**
+- [ ] `_build_fallback_id_map` runs before every diff (not only on detected mismatch); is a no-op when IDs are stable
+- [ ] `_extract_rationale` matches `_RATIONALE_KEYS` case-insensitively on property keys
+
+**Correctness — Render**
+- [ ] All git operations (`git diff`, `git checkout -b`, `git commit`) use `cwd=str(worktrees["dest"])`, not the original `dest_repo` path
+- [ ] `build_fix_proposal` receives `source_repo`, `source_before_ref`, `dest_repo`, `dest_base`, and `commit_message` — not empty strings or duplicated dest paths
+- [ ] `FIX_PROPOSAL.md` "Source:" line correctly shows source repo and both refs; "Destination:" shows dest repo and base
+
+**Correctness — Schema Discovery**
+- [ ] `discover_and_write_schema` is called in `_stage2` after graph generation, not in Task 15
+- [ ] It is a no-op if `docs/graph_schema.md` already exists (idempotent)
 
 **LLM Prompt Quality**
 - [ ] Mapping prompt includes `fix_context`, the full diff, and the pruned destination graph
-- [ ] Mapping prompt explicitly specifies confidence must be one of `"high" | "medium" | "low"`
+- [ ] Mapping prompt explicitly specifies confidence must be exactly one of `"high" | "medium" | "low"`
 - [ ] Render prompt asks for file content only — no markdown fences, no explanation
 - [ ] Both prompts use double-brace escaping `{{}}` for JSON schema literals in f-strings
 
-**Error handling**
-- [ ] Every stage failure writes to `error.log` before returning non-zero
-- [ ] `git apply` failure in stage 5 returns exit code 3 and leaves `fix.patch` on disk
-- [ ] LLM auth failure (missing env var) exits 1 with a helpful message about the missing key
+**Error Handling**
+- [ ] Every stage failure writes `error.log` before returning non-zero
+- [ ] Stage 1 clone failure produces a hint about auth (URL prefix check in `_ensure_local`)
+- [ ] Stage 4 LLM auth failure (missing env var) exits 1 — not 2 (2 is reserved for JSON parse failure)
+- [ ] `_parse_mapping_response`: exactly one retry, then raises `ValueError("LLM response unparseable after retry")`; never silently returns an empty result
 
 **Testing**
-- [ ] All unit tests use `MockLLMClient` — no real API calls
-- [ ] Integration tests patch `_stage1` / `_stage2` when real Graphify is not available
-- [ ] Contract tests are marked `@pytest.mark.contract` and skip gracefully when Graphify absent
+- [ ] All unit tests use `MockLLMClient` or `SequencedMockLLMClient` — no real API calls anywhere in CI
+- [ ] Integration tests pre-create worktrees and copy fixture graphs; no real Graphify invoked
+- [ ] `SequencedMockLLMClient` call order is deterministic: call 0 → mapping JSON (stage 4), call 1 → Go file content (stage 5)
+- [ ] Contract tests are marked `@pytest.mark.contract` and skip gracefully when Graphify is absent
 - [ ] Each BDD scenario has an explicit Given/When/Then docstring
+- [ ] `test_discover_and_write_schema_skips_if_exists` confirms idempotency
 
 **Documentation**
 - [ ] `README.md` lists all CLI flags with types and defaults
-- [ ] `docs/graph_schema.md` is committed after first real Graphify run (not in repo initially)
-- [ ] `FIX_PROPOSAL.md` template in `render.py` matches the spec exactly (branch name format, table columns)
+- [ ] `README.md` exit codes table shows only 0, 1, 2 — no exit code 3
+- [ ] `FIX_PROPOSAL.md` template in `render.py` matches spec exactly: branch name format `graph-merge/port-<sha7>-<YYYYMMDD>`, table with Source/Destination/Confidence/Rationale columns
+- [ ] `docs/graph_schema.md` is auto-generated on first real run; it is not committed to the repo initially (add to `.gitignore`)
+
+---
+
+## Testing Matrix
+
+| Layer | File | What it covers |
+|-------|------|----------------|
+| Unit | `test_types.py` | Dataclass defaults, field types, `MappingResult` construction |
+| Unit | `test_cli.py` | `--source-fix-commit` expansion, mutual exclusivity, defaults, `main()` wiring |
+| Unit | `test_graph_loading.py` | `load_graph` dict and list node formats, field mapping, `properties` capture, `discover_and_write_schema` create and skip |
+| Unit | `test_diff.py` | Empty diff, `node_modified`, `edge_added`, rationale extraction, fallback ID map |
+| Unit | `test_pruning.py` | Seed selection, 2-hop BFS, god node exclusion, hard cap, camelCase token matching |
+| Unit | `test_runner.py` | `artifacts_exist()` per stage, stage 5 requires both artifacts, stage skipping, `--force-stage`, error log written on failure, edge deserialization (indirect) |
+| Unit | `test_render.py` | `build_fix_proposal` content (branch, refs, table, unmappable), `generate_patch_content` LLM call count |
+| Unit | `test_llm_client.py` | `MockLLMClient` call recording, `create_client` format validation, unknown provider rejection |
+| Unit | `test_checkout.py` | `_ensure_local` local vs URL, worktree dirs created, before/after content isolation |
+| Integration | `test_pipeline.py` | Full run stages 3–5 with sequenced mock; all-artifact skip; partial resume from stage 3 |
+| Contract | `test_llm_parsing.py` | Valid JSON parsed, invalid JSON triggers one retry, two failures raises `ValueError`, missing `type` field in unmappable |
+| Contract | `test_graphify_output.py` | `generate_graph` produces parseable JSON; nodes have required fields. Skipped if Graphify not installed. |
+
+**Fast suite (CI):**
+```bash
+pytest tests/unit tests/integration -m "not contract"
+```
+
+**Contract suite (requires Graphify + API keys):**
+```bash
+pytest tests/contract -v -m contract
+```
 
 ---
 
