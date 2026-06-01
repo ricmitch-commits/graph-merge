@@ -88,7 +88,13 @@ def generate_graph(worktree_path: Path, output_path: Path, label: str) -> None:
         capture_output=True, text=True,
     )
     if result.returncode != 0:
-        raise RuntimeError(f"Graphify failed:\n{result.stderr.strip()}")
+        stderr = result.stderr.strip()
+        if "No module named 'graphify'" in stderr or "No module named 'tree_sitter'" in stderr:
+            raise RuntimeError(
+                "Graphify is not installed in the active Python environment.\n"
+                f"Run: {py} -m pip install graphifyy\n\n{stderr}"
+            )
+        raise RuntimeError(f"Graphify failed:\n{stderr}")
 
     # Make source_file paths relative to the worktree so they're portable
     data = json.loads(result.stdout)
