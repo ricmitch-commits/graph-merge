@@ -1,4 +1,5 @@
 import pytest
+from unittest.mock import patch
 from cli import build_parser, validate_args
 
 
@@ -79,3 +80,20 @@ def test_max_context_nodes_default():
         "--model", "claude/claude-opus-4-6",
     ])
     assert args.max_context_nodes == 500
+
+
+def test_main_calls_run_pipeline(tmp_path):
+    with patch("sys.argv", [
+        "graph-merge",
+        "--source-repo", str(tmp_path),
+        "--source-fix-commit", "abc",
+        "--dest-repo", str(tmp_path),
+        "--dest-base", "main",
+        "--model", "claude/claude-opus-4-6",
+        "--output", str(tmp_path / "out"),
+    ]), patch("pipeline.runner.run_pipeline", return_value=0) as mock_run, \
+       patch("sys.exit") as mock_exit:
+        from cli import main
+        main()
+        assert mock_run.called
+        mock_exit.assert_called_with(0)
