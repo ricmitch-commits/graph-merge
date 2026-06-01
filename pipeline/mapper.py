@@ -63,8 +63,14 @@ def run_mapping(
     god_nodes = load_god_nodes(output_dir / "graphs" / "dest_report.md")
     pruned = prune_graph(dest_nodes, dest_edges, changed_symbols, god_nodes, max_context_nodes)
 
+    def _serialize_change(c) -> dict:
+        d = {k: v for k, v in vars(c).items() if v is not None and k != "edge"}
+        if c.edge is not None:
+            d["edge"] = vars(c.edge)
+        return d
+
     changes_json = json.dumps(
-        [{k: v for k, v in vars(c).items() if v is not None} for c in semantic_diff.changes],
+        [_serialize_change(c) for c in semantic_diff.changes],
         indent=2,
     )
     dest_json = json.dumps(
