@@ -1,23 +1,9 @@
 import json
-import os
 import subprocess
 import sys
 from pathlib import Path
 
 from models.types import GraphEdge, GraphNode
-
-# Vendored Graphify lives at <repo-root>/vendor/graphify
-_VENDOR_GRAPHIFY = Path(__file__).parent.parent / "vendor" / "graphify"
-
-
-def _graphify_env() -> dict:
-    """Build an environment that makes the vendored Graphify importable."""
-    env = os.environ.copy()
-    paths = [str(_VENDOR_GRAPHIFY)]
-    if existing := env.get("PYTHONPATH"):
-        paths.append(existing)
-    env["PYTHONPATH"] = os.pathsep.join(paths)
-    return env
 
 
 def load_graph(graph_path: Path) -> tuple[dict[str, GraphNode], list[GraphEdge]]:
@@ -95,12 +81,11 @@ def generate_graph(worktree_path: Path, output_path: Path, label: str) -> None:
     absolute (rooted at worktree_path) and are made relative before saving.
     """
     output_path.parent.mkdir(parents=True, exist_ok=True)
-    env = _graphify_env()
     py = sys.executable
 
     result = subprocess.run(
         [py, "-m", "graphify.extract", str(worktree_path.resolve())],
-        capture_output=True, text=True, env=env,
+        capture_output=True, text=True,
     )
     if result.returncode != 0:
         raise RuntimeError(f"Graphify failed:\n{result.stderr.strip()}")
