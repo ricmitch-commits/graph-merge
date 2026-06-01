@@ -69,16 +69,23 @@ def _ensure_local(repo: str, clone_target: Path) -> Path:
 
 
 def _resolve_ref(repo: Path, ref: str) -> str:
-    """Resolve a git revision expression (e.g. HEAD^, abc123^) to a full commit SHA."""
-    result = subprocess.run(
-        ["git", "-C", str(repo), "rev-parse", "--verify", ref],
-        capture_output=True, text=True,
-    )
-    if result.returncode != 0:
-        raise RuntimeError(
-            f"Cannot resolve ref {ref!r} in {repo}:\n{result.stderr.strip()}"
+    """Resolve a git revision expression to a full commit SHA.
+
+    Tries the ref as-is first, then falls back to origin/<ref> so that
+    remote-tracking branches like 'openssl-3.4' work without needing a local
+    branch of the same name.
+    """
+    for candidate in (ref, f"origin/{ref}"):
+        result = subprocess.run(
+            ["git", "-C", str(repo), "rev-parse", "--verify", candidate],
+            capture_output=True, text=True,
         )
-    return result.stdout.strip()
+        if result.returncode == 0:
+            return result.stdout.strip()
+    raise RuntimeError(
+        f"Cannot resolve ref {ref!r} in {repo} (also tried 'origin/{ref}'):\n"
+        f"{result.stderr.strip()}"
+    )
 
 
 def _prune_worktrees(repo: Path) -> None:
