@@ -1,6 +1,7 @@
 # Design Spec: graph-merge
 
 **Date:** 2026-05-21
+**Revised:** 2026-06-01
 **Status:** Approved
 **Requirements:** `requirements.md`
 
@@ -15,7 +16,7 @@ Porting a bug fix from one branch or codebase to another fails when the target h
 ## Approach
 
 1. Check out the source repo at two refs (before and after the fix) and the destination repo at its base branch — all into isolated git worktrees.
-2. Generate a knowledge graph for each of the three states using Graphify (vendored).
+2. Generate a knowledge graph for each of the three states using Graphify (vendored as a git submodule, invoked as a black-box subprocess).
 3. Diff the before/after graphs algorithmically to produce a semantic change set.
 4. Use an LLM to map each changed node onto its structural equivalent in the destination graph.
 5. Render a unified patch and a human-readable proposal; apply the patch to a new branch in the destination repo.
@@ -27,22 +28,32 @@ Porting a bug fix from one branch or codebase to another fails when the target h
 
 ```
 graph-merge
-├── cli.py                  entry point, argument parsing
+├── cli.py                      entry point — arg parsing, validate_args(), args_to_config()
 ├── pipeline/
-│   ├── runner.py           stage orchestrator (skip if artifacts exist)
-│   ├── checkout.py         stage 1 — git clone + worktree management
-│   ├── graph.py            stage 2 — Graphify invocation
-│   ├── diff.py             stage 3 — semantic graph diff
-│   ├── mapper.py           stage 4 — LLM fix mapping
-│   └── render.py           stage 5 — patch + FIX_PROPOSAL.md + branch creation
+│   ├── runner.py               stage orchestrator; artifacts_exist(); error.log; _NoChanges
+│   ├── checkout.py             stage 1 — _ensure_local(), _add_worktree(), atexit cleanup
+│   ├── graph.py                stage 2 — generate_graph(), load_graph(), discover_and_write_schema()
+│   ├── diff.py                 stage 3 — compute_semantic_diff(), _build_fallback_id_map()
+│   ├── pruning.py              context pruning — prune_graph(), load_god_nodes(), _bfs()
+│   ├── mapper.py               stage 4 — run_mapping(), _parse_mapping_response()
+│   └── render.py               stage 5 — run_render(), generate_patch_content(), build_fix_proposal()
 ├── models/
-│   └── types.py            dataclasses: GraphNode, GraphEdge, Change, Mapping
+│   ├── types.py                GraphNode, GraphEdge, Change, SemanticDiff, Mapping, MappingResult, ...
+│   └── config.py               Config dataclass (all parsed CLI args + computed paths)
 ├── llm/
-│   └── client.py           pluggable LLM client (Claude / Gemini / OpenAI)
+│   ├── client.py               LLMClient Protocol, MockLLMClient, create_client() factory
+│   ├── anthropic_client.py     AnthropicClient
+│   ├── openai_client.py        OpenAIClient
+│   └── gemini_client.py        GeminiClient
 ├── tests/
-│   └── fixtures/           two minimal git repos (Python + Go) with a known fix
-└── vendor/
-    └── graphify/           git submodule (pinned commit)
+│   ├── unit/                   test_types, test_cli, test_diff, test_pruning, test_graph_loading,
+│   │                           test_runner, test_render, test_llm_client, test_checkout
+│   ├── integration/            test_pipeline (BDD Given/When/Then), conftest with fixture repos
+│   ├── contract/               test_llm_parsing, test_graphify_output (skipped if Graphify absent)
+│   └── fixtures/
+│       ├── graphs/             before.json, after.json, dest.json
+│       └── responses/          mapping_valid.json, mapping_invalid.json
+└── vendor/graphify/            git submodule (pinned commit)
 ```
 
 ### Output Directory Layout
@@ -59,9 +70,11 @@ graph-merge
 ├── graphs/
 │   ├── before.json
 │   ├── after.json
-│   └── dest.json
+│   ├── dest.json
+│   └── dest_report.md      GRAPH_REPORT.md from Graphify (god node identification)
 ├── semantic_diff.json      stage 3 artifact
 ├── mapping.json            stage 4 artifact
+├── mapping_raw.txt         written only if LLM response fails JSON parsing twice
 ├── fix.patch               unified diff for destination
 ├── FIX_PROPOSAL.md         human-readable proposal with confidence levels
 └── error.log               written on any stage failure
@@ -71,9 +84,7 @@ graph-merge
 
 ## Data Model
 
-### `GraphNode` / `GraphEdge`
-
-Graphify's `graph.json` schema is not publicly documented. On first successful graph generation, `pipeline/graph.py` infers the schema and writes it to `docs/graph_schema.md` (committed as a reference). The pipeline wraps nodes and edges in typed dataclasses:
+### `models/types.py`
 
 ```python
 @dataclass
@@ -82,9 +93,9 @@ class GraphNode:
     file: str
     symbol: str
     kind: str           # "function" | "class" | "variable" | "module"
-    calls: list[str]    # node IDs
-    imports: list[str]
-    properties: dict    # anything else Graphify emits
+    calls: list[str] = field(default_factory=list)
+    imports: list[str] = field(default_factory=list)
+    properties: dict = field(default_factory=dict)
 
 @dataclass
 class GraphEdge:
@@ -92,6 +103,70 @@ class GraphEdge:
     target: str
     relation: str       # "calls" | "imports" | "inherits" | ...
     confidence: str     # "EXTRACTED" | "INFERRED" | "AMBIGUOUS"
+
+@dataclass
+class Change:
+    type: str           # "node_added" | "node_removed" | "node_modified"
+                        # | "edge_added" | "edge_removed"
+    node_id: str | None = None
+    file: str | None = None
+    symbol: str | None = None
+    kind: str | None = None
+    before: dict | None = None
+    after: dict | None = None
+    rationale: str | None = None
+    edge: GraphEdge | None = None   # populated for edge_added / edge_removed
+
+@dataclass
+class SemanticDiff:
+    commit_message: str
+    changes: list[Change] = field(default_factory=list)
+
+@dataclass
+class SourceChange:
+    node_id: str
+    type: str = ""
+
+@dataclass
+class DestinationNode:
+    file: str
+    symbol: str
+
+@dataclass
+class Mapping:
+    source_change: SourceChange
+    destination_node: DestinationNode
+    confidence: str     # "high" | "medium" | "low"
+    rationale: str
+
+@dataclass
+class UnmappableChange:
+    source_change: SourceChange
+    reason: str
+
+@dataclass
+class MappingResult:
+    mappings: list[Mapping] = field(default_factory=list)
+    unmappable: list[UnmappableChange] = field(default_factory=list)
+```
+
+### `models/config.py`
+
+```python
+@dataclass
+class Config:
+    source_repo: str
+    source_before: str
+    source_after: str
+    dest_repo: str
+    dest_base: str
+    model: str
+    output_dir: Path
+    commit_message: str
+    max_context_nodes: int
+    keep_worktrees: bool
+    from_stage: int | None
+    force_stage: int | None
 ```
 
 ### `semantic_diff.json`
@@ -108,9 +183,19 @@ class GraphEdge:
       "kind": "function",
       "before": { "calls": ["db.query"], "properties": {} },
       "after":  { "calls": ["db.query", "logger.warn"], "properties": {} },
-      "rationale": "WHY comment if present"
+      "rationale": "Log invalid token attempts for audit trail"
     }
   ]
+}
+```
+
+Edge-type changes serialize `GraphEdge` inline:
+
+```json
+{
+  "type": "edge_added",
+  "edge": { "source": "src/auth.py::validate_token", "target": "logger.warn",
+            "relation": "calls", "confidence": "EXTRACTED" }
 }
 ```
 
@@ -141,17 +226,19 @@ Confidence is always exactly one of `high | medium | low`. The LLM is prompted t
 
 ## Stage 1: Checkout
 
-`--source-repo` and `--dest-repo` accept either a local path or a remote git URL. If a URL is given, the tool clones into `<output>/clones/` before creating worktrees.
+`--source-repo` and `--dest-repo` accept either a local path or a remote git URL. `_ensure_local` detects URLs by prefix (`http`, `git@`) and clones into `<output>/clones/` if needed; local paths are returned as-is.
 
 ```python
-# for each of the three states:
-git -C <repo> worktree add <output>/worktrees/<label> <ref>
-
-# cleanup via atexit handler (unless --keep-worktrees):
-git -C <repo> worktree remove <output>/worktrees/<label>
+def _add_worktree(repo: Path, path: Path, ref: str) -> None:
+    subprocess.run(
+        ["git", "-C", str(repo), "worktree", "add", str(path), ref],
+        check=True, capture_output=True,
+    )
 ```
 
-The `atexit` handler runs for any worktree successfully created in the current run, including on crash. If `--keep-worktrees` is passed, cleanup is skipped and paths are printed at exit.
+Three worktrees are created: `before`, `after`, `dest`. If any `_add_worktree` call fails, already-created worktrees are removed before the exception propagates.
+
+**Cleanup:** An `atexit` handler removes all worktrees created in the current run, including on crash. If `--keep-worktrees` is passed, the handler is not registered and paths are printed at exit.
 
 **Stage skipping:** If all three worktree directories exist, stage 1 is skipped.
 
@@ -159,18 +246,41 @@ The `atexit` handler runs for any worktree successfully created in the current r
 
 ## Stage 2: Graph Generation
 
-Graphify is invoked via subprocess from the vendored copy. No `--backend` flag is passed — pure tree-sitter AST parsing, no code leaves the machine during this stage.
+Graphify is invoked via subprocess from the vendored copy. It is treated as a black-box: only `graph.json` and `GRAPH_REPORT.md` outputs are consumed.
 
 ```python
-subprocess.run([
-    "python", "-m", "graphify.extract",
-    str(worktree_path),
-    "--output", str(graphs_dir / f"{label}.json"),
-    "--no-html",
-], check=True)
+def generate_graph(worktree_path: Path, output_path: Path, label: str) -> None:
+    # Primary: --no-html suppresses HTML output
+    result = subprocess.run(
+        ["python", "-m", "graphify.extract", str(worktree_path),
+         "--output", str(output_path), "--no-html"],
+        capture_output=True, text=True,
+    )
+    if result.returncode == 0:
+        return
+
+    # Fallback: --no-html not supported; Graphify writes to graphify-out/
+    if "--no-html" in result.stderr or "unrecognized arguments" in result.stderr:
+        result2 = subprocess.run(
+            ["python", "-m", "graphify.extract", str(worktree_path)],
+            capture_output=True, text=True, cwd=worktree_path,
+        )
+        if result2.returncode != 0:
+            raise RuntimeError(f"Graphify failed:\n{result2.stderr}")
+        src = worktree_path / "graphify-out" / "graph.json"
+        if not src.exists():
+            raise RuntimeError("Graphify ran but did not produce graph.json")
+        shutil.copy(src, output_path)
+        report_src = worktree_path / "graphify-out" / "GRAPH_REPORT.md"
+        if report_src.exists():
+            shutil.copy(report_src, output_path.parent / f"{label}_report.md")
+    else:
+        raise RuntimeError(f"Graphify failed:\n{result.stderr}")
 ```
 
-If Graphify does not support `--no-html`, the `graphify-out/` directory is generated and `graph.json` is moved to `graphs/<label>.json`. `GRAPH_REPORT.md` is also captured to `graphs/<label>_report.md` — stage 4 reads it to identify god nodes for context pruning.
+**Graph loading** (`load_graph`): normalizes graphify output regardless of whether nodes are emitted as a `dict` (keyed by ID) or a `list` (each item has an `id` field). Both formats are normalized to `dict[str, GraphNode]`. Known fields consumed: `id`, `file`, `symbol`/`name`, `kind`/`type`, `calls`, `imports`. All other fields are captured in `properties`.
+
+**Schema discovery:** On first successful run, `discover_and_write_schema()` infers node and edge fields from the actual output and writes `docs/graph_schema.md`. Called once from `runner._stage2` after graph generation; skipped if the file already exists.
 
 **Stage skipping:** If all three `graphs/*.json` files exist, stage 2 is skipped.
 
@@ -182,14 +292,18 @@ Pure Python — no LLM. Answers: *"What changed in the source codebase?"*
 
 **Algorithm:**
 1. Load both graphs into dicts keyed by node ID.
-2. Compute: `added = after_ids - before_ids`, `removed = before_ids - after_ids`, `common = before_ids & after_ids`.
-3. For nodes in `common`, compare `calls`, `imports`, and `properties` field by field. Any difference → `node_modified`.
-4. For edges, repeat on `(source, target, relation)` triples.
-5. Group changes sharing a file or direct call/import relationship into one `change_group` (FR-2.3).
+2. Run `_build_fallback_id_map` to remap unstable before-IDs to their after equivalents.
+3. Compute: `added = after_ids - before_ids`, `removed = before_ids - after_ids`, `common = before_ids & after_ids`.
+4. For nodes in `common`, compare `calls`, `imports`, and `properties` field by field. Any difference → `node_modified`.
+5. For edges, repeat on `(source, target, relation)` triples → `edge_added` / `edge_removed`.
 
-**Node identity:** Matched by ID. If IDs are not stable across runs (discovered via schema discovery), fallback matches on `(file, symbol, kind)` tuple.
+**Fallback ID matching** (`_build_fallback_id_map`): before diffing, builds a `dict[before_id → after_id]` for nodes where IDs differ but `(file, symbol, kind)` matches. Runs unconditionally — is a no-op (empty dict) when IDs are stable. Prevents graphify non-deterministic IDs from producing spurious `node_removed` + `node_added` pairs.
 
-**Rationale extraction:** Node properties containing keys matching `WHY`, `HACK`, `NOTE`, or `FIXME` (case-insensitive) are copied into the change record's `rationale` field.
+**Rationale extraction:** `_RATIONALE_KEYS = {"why", "hack", "note", "fixme"}`. Node `properties` keys matching any entry (case-insensitive) are copied into `Change.rationale`.
+
+**`_NoChanges` exit path:** if `compute_semantic_diff` returns zero changes, `runner._stage3` raises `_NoChanges` (private exception class). The runner catches it, prints a warning, and exits 0. This is not an error — it means the two refs are semantically identical.
+
+**Serialization:** `semantic_diff.json` is written by the runner, not by `diff.py`. `Change` objects with a non-None `edge` field serialize `vars(c.edge)` as a nested dict.
 
 **Stage skipping:** If `semantic_diff.json` exists, stage 3 is skipped.
 
@@ -198,6 +312,31 @@ Pure Python — no LLM. Answers: *"What changed in the source codebase?"*
 ## Stage 4: LLM Fix Mapping
 
 Answers: *"Where do those changes belong in the destination codebase?"* This is the only stage that calls an external service (when a cloud model is selected).
+
+### `run_mapping` signature
+
+```python
+def run_mapping(
+    semantic_diff: SemanticDiff,
+    dest_nodes: dict[str, GraphNode],
+    dest_edges: list[GraphEdge],
+    fix_context: str,
+    llm_client: LLMClient,
+    output_dir: Path,
+    max_context_nodes: int = 500,
+) -> MappingResult
+```
+
+### Context Pruning (delegated to `pipeline/pruning.py`)
+
+1. Extract `changed_symbols` from all `Change` objects with a non-None `symbol`.
+2. `load_god_nodes(output_dir / "graphs" / "dest_report.md")` — parses `GRAPH_REPORT.md` for lines containing "god node" or "highest degree"; extracts backtick-quoted symbol names. Returns empty set if file absent.
+3. `prune_graph(dest_nodes, dest_edges, changed_symbols, god_nodes, max_context_nodes)`:
+   - `_tokenize(symbol)` splits camelCase, PascalCase, and snake_case into lowercase tokens; filters tokens shorter than 2 chars.
+   - Seed nodes: destination nodes whose symbol shares at least one token with any changed symbol.
+   - Expand 2 hops via BFS over the bidirectional adjacency graph (`_bfs`).
+   - Remove god nodes from result.
+   - If still over `max_context_nodes`, drop lowest-degree nodes first.
 
 ### Prompt Structure
 
@@ -211,7 +350,7 @@ You are a senior engineer porting a bug fix between two codebases.
 <semantic_diff.json changes array, pretty-printed>
 
 ## Destination Codebase Graph
-<dest.json nodes and edges, pruned — see Context Pruning below>
+<dest.json nodes and edges, pruned>
 
 ## Your Task
 For each change in the diff, identify the structurally equivalent node
@@ -228,27 +367,30 @@ Respond with valid JSON only, matching this schema:
 <mapping.json schema>
 ```
 
-### Context Pruning
+### Response Parsing (`_parse_mapping_response`)
 
-Large destination graphs are pruned before sending:
-1. All nodes within 2 hops of any node whose symbol shares a token with a changed node.
-2. All god nodes (highest degree centrality, flagged in Graphify's `GRAPH_REPORT.md`).
-3. Hard cap: if still over `--max-context-nodes` (default 500), drop lowest-degree nodes first.
+```python
+def _parse_mapping_response(
+    response: str,
+    llm_client: LLMClient,
+    raw_path: Path | None = None,
+) -> MappingResult
+```
+
+- Attempt `json.loads(response)` → build `MappingResult`.
+- On `JSONDecodeError`: send one retry prompt: `"Your previous response was not valid JSON. Respond with JSON only.\n" + response`.
+- On second `JSONDecodeError`: write raw response to `mapping_raw.txt` (if `raw_path` provided), raise `ValueError("LLM response unparseable after retry")` → runner catches as exit code 2.
 
 ### LLM Client
 
-`llm/client.py` wraps Anthropic / Gemini / OpenAI SDKs behind a single interface:
+`llm/client.py` defines the `LLMClient` Protocol, `MockLLMClient`, and `create_client()` factory. Provider SDK imports are lazy — each provider module is imported only when its prefix is matched.
 
 ```python
-class LLMClient:
+class LLMClient(Protocol):
     def complete(self, prompt: str) -> str: ...
 ```
 
-`--model` format: `<provider>/<model-id>` — e.g. `claude/claude-opus-4-7`, `openai/gpt-4o`, `gemini/gemini-2.0-flash`.
-
-### Response Parsing
-
-If JSON parsing fails, one retry with: `"Your previous response was not valid JSON. Respond with JSON only."` If the second attempt fails, exit code 2, raw response written to `mapping_raw.txt`.
+`--model` format: `<provider>/<model-id>` — e.g. `claude/claude-opus-4-6`, `openai/gpt-4o`, `gemini/gemini-2.0-flash`.
 
 **Stage skipping:** If `mapping.json` exists, stage 4 is skipped.
 
@@ -256,17 +398,53 @@ If JSON parsing fails, one retry with: `"Your previous response was not valid JS
 
 ## Stage 5: Output Rendering
 
-### `fix.patch`
+### `generate_patch_content`
 
-For each mapping (all confidence levels), the renderer:
-1. Groups mappings by destination file to minimize LLM calls.
-2. For each destination file, reads all changed source snippets (from `after/`) and the full destination file (from `dest/`).
-3. Calls the LLM once per destination file with all relevant snippets and mapping rationales to produce the exact code changes.
-4. Writes the result as unified diff entries for that file.
+```python
+def generate_patch_content(
+    mapping_result: MappingResult,
+    worktrees: dict[str, Path],
+    llm_client: LLMClient,
+) -> dict[str, str]   # dest_file → new file content
+```
 
-Unmappable items produce a comment block in the patch explaining what was skipped.
+Groups mappings by destination file. For each file: reads the full destination file from `worktrees["dest"]` and source snippets from `worktrees["after"]` (resolved from `node_id` via `file::symbol` split). Calls the LLM once per destination file requesting only the modified file content (no markdown fences, no explanation). Returns new file contents — not diffs.
 
-### `FIX_PROPOSAL.md`
+### `run_render`
+
+```python
+def run_render(
+    mapping_result: MappingResult,
+    worktrees: dict[str, Path],
+    dest_repo_path: Path,
+    source_after_ref: str,
+    llm_client: LLMClient,
+    output_dir: Path,
+) -> str   # branch name
+```
+
+1. Calls `generate_patch_content` → writes new file contents into `worktrees["dest"]`.
+2. Runs `git diff` in `worktrees["dest"]` to capture the unified diff as `fix.patch`. Prepends unmappable items as `# graph-merge: unmappable changes (not applied)` comment lines.
+3. Creates branch `graph-merge/port-<sha7>-<YYYYMMDD>` in `worktrees["dest"]` via `git checkout -b`.
+4. Commits with `git commit -am "graph-merge: port fix from <source_after_ref>"` in `worktrees["dest"]`.
+5. Writes `FIX_PROPOSAL.md` via `build_fix_proposal`.
+
+### `build_fix_proposal`
+
+```python
+def build_fix_proposal(
+    mapping_result: MappingResult,
+    branch_name: str,
+    source_repo: str,
+    source_before_ref: str,
+    source_after_ref: str,
+    dest_repo: str,
+    dest_base: str,
+    commit_message: str,
+) -> str   # markdown content
+```
+
+Pure function. Produces:
 
 ```markdown
 # Fix Proposal
@@ -291,22 +469,19 @@ Branch: graph-merge/port-<sha>-<timestamp>
 3. Push and open a PR
 ```
 
-### Branch Creation
+### All-Unmappable Exit Path
 
-```python
-subprocess.run(["git", "apply", "fix.patch"], cwd=worktrees/dest, check=False)
-# fallback to --reject if apply fails partially
-subprocess.run(["git", "checkout", "-b", branch_name], cwd=dest_repo)
-subprocess.run(["git", "commit", "-am", f"graph-merge: port fix from {source_after_ref}"])
-```
+If `mapping_result.mappings` is empty, `runner._stage5` skips `run_render` entirely, calls `build_fix_proposal` directly with `branch_name="(none — all changes unmappable)"`, writes `FIX_PROPOSAL.md`, and returns exit code 0 with a warning. No branch is created, no patch is written.
 
-If `git apply` fails entirely, exit code 3: `fix.patch` is left on disk, manual instructions are printed. The tool never pushes or opens a PR.
+The tool never pushes or opens a PR regardless of outcome.
+
+**Stage skipping:** If both `fix.patch` and `FIX_PROPOSAL.md` exist, stage 5 is skipped.
 
 **At successful exit:**
 ```
-Branch created: graph-merge/port-a1b2c3d-20260521
-To push:  git -C <dest-repo> push origin graph-merge/port-a1b2c3d-20260521
-Review:   ./run-out/FIX_PROPOSAL.md
+Branch created: graph-merge/port-a1b2c3d-20260601
+To push:  git -C <dest-repo> push origin graph-merge/port-a1b2c3d-20260601
+Review:   ./graph-merge-out/FIX_PROPOSAL.md
 ```
 
 ---
@@ -319,10 +494,10 @@ graph-merge \
   --source-before      <ref>         git ref: pre-fix state
   --source-after       <ref>         git ref: post-fix state
   --source-fix-commit  <sha>         shorthand: expands to --source-before <sha>^ --source-after <sha>
-                                    mutually exclusive with --source-before / --source-after
+                                     mutually exclusive with --source-before / --source-after
   --dest-repo          <path|url>    local path or remote git URL
   --dest-base          <ref>         base branch/commit to create the fix branch from
-  --model              <p/model>     required: e.g. claude/claude-opus-4-7
+  --model              <p/model>     required: e.g. claude/claude-opus-4-6
   --output             <dir>         default: ./graph-merge-out
   --commit-message     <text>        optional LLM context
   --pr-description     <file>        optional markdown file, alternative to --commit-message
@@ -336,10 +511,9 @@ graph-merge \
 
 | Code | Meaning |
 |------|---------|
-| 0 | All stages completed, branch created |
+| 0 | All stages completed, branch created (or all changes unmappable — see FIX_PROPOSAL.md) |
 | 1 | A required stage failed |
 | 2 | LLM response unparseable after retry |
-| 3 | `git apply` failed; `fix.patch` written but branch not created |
 
 ---
 
@@ -353,28 +527,40 @@ Each stage fails fast and writes to `error.log` before exiting.
 | 1 | Ref not found | Exit 1, print available branches/tags |
 | 2 | Graphify non-zero exit | Exit 1, surface Graphify stderr |
 | 2 | `graph.json` not produced | Exit 1, hint at flag compatibility |
-| 3 | No structural changes detected | Exit 0 with warning |
+| 3 | No structural changes detected | Exit 0 with warning (`_NoChanges`) |
 | 4 | `--model` not provided | Exit 1 before any stage runs |
 | 4 | LLM auth failure | Exit 1, print missing env var |
 | 4 | JSON parse fails twice | Exit 2, write `mapping_raw.txt` |
-| 5 | `git apply` fails | Exit 3, print manual instructions |
+| 5 | Stage 5 LLM or git failure | Exit 1, write `error.log` |
 | 5 | All mappings unmappable | Exit 0 with warning, write `FIX_PROPOSAL.md` |
 
 ---
 
 ## Testing
 
-| Layer | What | How |
-|-------|------|-----|
-| Unit | Semantic diff algorithm | Fixture graph pairs; assert expected `semantic_diff.json` |
-| Unit | Context pruning | Synthetic graphs with known hop distances; assert node counts |
-| Unit | CLI argument parsing | `--source-fix-commit` expansion, mutual exclusivity |
-| Integration | Full pipeline | Two fixture repos under `tests/fixtures/` (Python + Go); golden-file assert on `FIX_PROPOSAL.md` structure |
-| Integration | Stage skipping | Run pipeline, delete one artifact, re-run; assert skipped stages via log |
-| Contract | LLM response parsing | Fixture responses (valid, invalid, partial JSON); assert retry and exit behavior |
-| Contract | Graphify output | Run Graphify on fixture repo; assert dataclasses parse without error |
+| Layer | File | What it tests |
+|-------|------|---------------|
+| Unit | `test_types.py` | Dataclass defaults, field types, `MappingResult` construction |
+| Unit | `test_cli.py` | `--source-fix-commit` expansion, mutual exclusivity, default values, `main()` wiring |
+| Unit | `test_graph_loading.py` | `load_graph` with dict and list node formats, field mapping, `properties` capture |
+| Unit | `test_diff.py` | Empty diff, `node_modified`, `edge_added`, rationale extraction, fallback ID map |
+| Unit | `test_pruning.py` | Seed selection, 2-hop BFS, god node exclusion, hard cap, camelCase token matching |
+| Unit | `test_runner.py` | `artifacts_exist()` per stage, stage skipping, `--force-stage` override, error log written on failure |
+| Unit | `test_render.py` | `build_fix_proposal` content, `generate_patch_content` LLM call count |
+| Unit | `test_llm_client.py` | `MockLLMClient` call recording, `create_client` format validation, unknown provider rejection |
+| Unit | `test_checkout.py` | `_ensure_local` local vs URL, worktree dirs created, before/after content isolation |
+| Integration | `test_pipeline.py` | Full run (stages 1–2 bypassed via fixture graphs + mock LLM); stage skipping (all artifacts present); partial resume (semantic_diff.json deleted, stage 3 reruns) |
+| Contract | `test_llm_parsing.py` | Valid JSON parsed, invalid JSON triggers one retry, two failures raises `ValueError`, missing `type` field in unmappable |
+| Contract | `test_graphify_output.py` | `generate_graph` produces parseable JSON; nodes have required fields. Skipped if Graphify not installed (`@pytest.mark.skipif`). |
 
-LLM calls in tests use a mock client returning fixture JSON — no real API calls in CI.
+**LLM calls in all unit and integration tests use `MockLLMClient` — no real API calls in CI.**
+
+**Test markers:** `integration` (requires fixture git repos), `contract` (requires Graphify subprocess and/or real API keys).
+
+```bash
+pytest tests/unit tests/integration -m "not contract"   # fast suite
+pytest tests/contract -v -m contract                    # requires Graphify + API keys
+```
 
 ---
 
@@ -383,13 +569,13 @@ LLM calls in tests use a mock client returning fixture JSON — no real API call
 | # | Decision | Rationale |
 |---|----------|-----------|
 | 1 | Input refs accept any git ref (SHA, branch, tag, relative) | Passed directly to `git worktree add`; no need to restrict the format |
-| 2 | `--source-fix-commit <sha>` shorthand expands to `--source-before <sha>^ --source-after <sha>` | Common case is a single commit; shorthand avoids error-prone manual SHA arithmetic |
-| 3 | `--dest-ref` renamed to `--dest-base` | The flag specifies the *base* the fix branch is created from, not the final destination ref — which doesn't exist yet |
+| 2 | `--source-fix-commit <sha>` expands to `--source-before <sha>^ --source-after <sha>` | Common case is a single commit; shorthand avoids error-prone manual SHA arithmetic |
+| 3 | `--dest-ref` renamed to `--dest-base` | The flag specifies the base the fix branch is created from, not the final destination ref — which doesn't exist yet |
 | 4 | No default LLM backend; `--model` is required | NFR-1: code must not leave the machine without explicit user opt-in |
 | 5 | `--model` format is `<provider>/<model-id>` | Single flag selects both SDK and model; unambiguous, extensible |
 | 6 | Graph generation uses no LLM backend (pure tree-sitter) | Graphify's AST parsing is local; avoids sending code to cloud during graph stage |
 | 7 | Graphify vendored as a git submodule at `vendor/graphify/` | Pins behavior against upstream changes; submodule allows deliberate updates |
-| 8 | Parse `graph.json` directly rather than via Graphify's MCP server | Full control over diff algorithm; no running daemon required; schema discovered once and committed |
+| 8 | Graphify treated as a black-box subprocess; only `graph.json` and `GRAPH_REPORT.md` consumed | Decouples graph-merge from Graphify's internal module paths and dependency versions; a Graphify update can't silently break imports |
 | 9 | Schema discovery on first run, written to `docs/graph_schema.md` | `graph.json` format is undocumented; discovery makes the schema explicit and reviewable |
 | 10 | Staged pipeline with artifact caching | Expensive steps (graph gen, LLM) can be re-run independently; aligns with NFR-4 (all intermediates on disk) |
 | 11 | Stage skipping is automatic; `--from-stage` and `--force-stage` for manual control | Default UX is resume-on-rerun; explicit flags for iteration on a specific stage |
@@ -397,6 +583,15 @@ LLM calls in tests use a mock client returning fixture JSON — no real API call
 | 13 | Stage 5 creates a branch in the destination repo with the patch applied | Full automation up to the PR; human reviews `FIX_PROPOSAL.md` and opens the PR manually |
 | 14 | Tool never pushes or opens a PR | Human in the loop for the final step; avoids unreviewed changes hitting remote |
 | 15 | `atexit` handler cleans up worktrees on crash | Prevents orphaned git worktrees across runs |
-| 16 | LLM called twice in stage 5 (once per mapped node for code snippet) | Mapping (stage 4) reasons structurally; rendering (stage 5) reasons about actual code — different tasks, different prompts |
+| 16 | LLM called twice in stage 5 (once per mapped destination file for code content) | Mapping (stage 4) reasons structurally; rendering (stage 5) reasons about actual code — different tasks, different prompts |
 | 17 | Single `fix.patch` for all changes | `git apply` is the standard handoff; one file is simpler than per-change patches |
 | 18 | Fixture repos in `tests/fixtures/` are Python + Go | Tests cross-language porting, which is the hardest and most representative case |
+| 19 | `pruning.py` is a separate module from `mapper.py` | Pruning is independently testable with synthetic graphs; embedding it in `mapper.py` would require a real LLM client in pruning tests |
+| 20 | `_NoChanges` is a private exception, not a return value | A sentinel return value would require every call site to check it; the exception lets `runner.run_pipeline` intercept cleanly and exit 0 without polluting the `compute_semantic_diff` signature |
+| 21 | `load_graph` handles both dict and list node formats | Graphify's schema is undocumented and has varied across versions; normalizing both formats at load time isolates the variability to one function |
+| 22 | Provider clients in separate files (`anthropic_client.py`, etc.) | Provider SDK imports are lazy — `openai` not imported unless `--model openai/...` is passed; prevents import errors for users who have only one SDK installed |
+| 23 | `models/config.py` is separate from `models/types.py` | `Config` depends on `pathlib.Path` and is CLI-specific; `types.py` is pure domain model. Separation makes `types.py` importable in any context |
+| 24 | `generate_patch_content` returns new file content, not diffs | Generating a diff from LLM output is brittle; writing content to the worktree and running `git diff` produces a well-formed patch regardless of LLM output formatting |
+| 25 | All-unmappable exit writes `FIX_PROPOSAL.md` and exits 0 | The user still needs to see which changes were unmappable and why; exiting non-zero would suppress the proposal and give no actionable output |
+| 26 | `_build_fallback_id_map` runs before every diff, not only on detected mismatch | Checking for ID stability adds complexity for marginal benefit; the fallback map is a no-op (empty dict) when IDs are stable |
+| 27 | `run_render` writes new content into `worktrees["dest"]` then captures `git diff` | Avoids constructing unified diff format manually; `git diff` produces correct hunks, handles whitespace consistently, and produces the same format `git apply` expects |
