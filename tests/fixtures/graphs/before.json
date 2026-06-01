@@ -1,0 +1,16 @@
+{
+  "nodes": {
+    "src/auth.py::validate_token": {
+      "file": "src/auth.py", "symbol": "validate_token", "kind": "function",
+      "calls": ["db.query"], "imports": [], "properties": {}
+    },
+    "src/auth.py::TokenCache": {
+      "file": "src/auth.py", "symbol": "TokenCache", "kind": "class",
+      "calls": [], "imports": [], "properties": {}
+    }
+  },
+  "edges": [
+    {"source": "src/auth.py::validate_token", "target": "db.query",
+     "relation": "calls", "confidence": "EXTRACTED"}
+  ]
+}

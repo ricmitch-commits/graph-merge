@@ -1,0 +1,12 @@
+{
+  "nodes": {
+    "internal/auth/service.go::ValidateToken": {
+      "file": "internal/auth/service.go", "symbol": "ValidateToken", "kind": "function",
+      "calls": ["db.QueryRow"], "imports": ["database/sql"], "properties": {}
+    }
+  },
+  "edges": [
+    {"source": "internal/auth/service.go::ValidateToken", "target": "db.QueryRow",
+     "relation": "calls", "confidence": "EXTRACTED"}
+  ]
+}
