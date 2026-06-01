@@ -5,7 +5,7 @@ class VertexClient:
     GOOGLE_APPLICATION_CREDENTIALS to a service account key file.
 
     Environment variables:
-      VERTEX_PROJECT   - GCP project ID (required)
+      VERTEX_PROJECT_ID   - GCP project ID (required)
       VERTEX_LOCATION  - GCP region (default: us-central1)
 
     Model routing:
@@ -18,7 +18,7 @@ class VertexClient:
 
     def complete(self, prompt: str) -> str:
         import os
-        project = os.environ.get("VERTEX_PROJECT")
+        project = os.environ.get("VERTEX_PROJECT_ID")
         location = os.environ.get("VERTEX_LOCATION", "us-central1")
 
         if self._model_id.startswith("claude"):
