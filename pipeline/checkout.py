@@ -19,6 +19,10 @@ def setup_worktrees(
     source_local = _ensure_local(source_repo, clones_dir / "source")
     dest_local = _ensure_local(dest_repo, clones_dir / "dest")
 
+    # Prune stale worktree registrations left by a previous failed run
+    _prune_worktrees(source_local)
+    _prune_worktrees(dest_local)
+
     paths = {
         "before": worktrees_dir / "before",
         "after": worktrees_dir / "after",
@@ -33,10 +37,11 @@ def setup_worktrees(
         created.append((source_local, paths["after"]))
         _add_worktree(dest_local, paths["dest"], dest_base)
         created.append((dest_local, paths["dest"]))
-    except subprocess.CalledProcessError:
+    except RuntimeError:
         for repo, path in created:
             subprocess.run(
-                ["git", "-C", str(repo), "worktree", "remove", "--force", str(path)],
+                ["git", "-C", str(repo), "worktree", "remove", "--force",
+                 str(path.resolve())],
                 capture_output=True,
             )
         raise
@@ -45,7 +50,8 @@ def setup_worktrees(
         def _cleanup() -> None:
             for repo, path in created:
                 subprocess.run(
-                    ["git", "-C", str(repo), "worktree", "remove", "--force", str(path)],
+                    ["git", "-C", str(repo), "worktree", "remove", "--force",
+                     str(path.resolve())],
                     capture_output=True,
                 )
         atexit.register(_cleanup)
@@ -62,9 +68,20 @@ def _ensure_local(repo: str, clone_target: Path) -> Path:
     return Path(repo)
 
 
-def _add_worktree(repo: Path, path: Path, ref: str) -> None:
-    # path must be absolute — git -C changes cwd so relative paths resolve wrongly
+def _prune_worktrees(repo: Path) -> None:
     subprocess.run(
-        ["git", "-C", str(repo), "worktree", "add", str(path.resolve()), ref],
-        check=True, capture_output=True,
+        ["git", "-C", str(repo), "worktree", "prune"],
+        capture_output=True,
     )
+
+
+def _add_worktree(repo: Path, path: Path, ref: str) -> None:
+    abs_path = path.resolve()
+    result = subprocess.run(
+        ["git", "-C", str(repo), "worktree", "add", str(abs_path), ref],
+        capture_output=True, text=True,
+    )
+    if result.returncode != 0:
+        raise RuntimeError(
+            f"git worktree add {ref!r} -> {abs_path} failed:\n{result.stderr.strip()}"
+        )
