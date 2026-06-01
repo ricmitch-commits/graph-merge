@@ -88,23 +88,41 @@ def run_mapping(
     return _parse_mapping_response(response, llm_client, raw_path=raw_path)
 
 
+def _extract_json(text: str) -> str:
+    """Strip markdown code fences and find the outermost JSON object."""
+    text = text.strip()
+    # Strip ```json ... ``` or ``` ... ``` fences
+    if text.startswith("```"):
+        lines = text.splitlines()
+        text = "\n".join(lines[1:-1] if lines[-1].strip() == "```" else lines[1:])
+    # Find first { in case there's still a preamble
+    start = text.find("{")
+    if start != -1:
+        text = text[start:]
+    return text
+
+
 def _parse_mapping_response(
     response: str, llm_client, raw_path: Path | None = None
 ) -> MappingResult:
     try:
-        return _build_mapping_result(json.loads(response))
+        return _build_mapping_result(json.loads(_extract_json(response)))
     except json.JSONDecodeError:
         retry_prompt = (
-            "Your previous response was not valid JSON. Respond with JSON only.\n"
+            "Your previous response was not valid JSON. "
+            "Respond with a raw JSON object only — no markdown, no code fences.\n"
             + response
         )
         response2 = llm_client.complete(retry_prompt)
         try:
-            return _build_mapping_result(json.loads(response2))
+            return _build_mapping_result(json.loads(_extract_json(response2)))
         except json.JSONDecodeError as exc:
             if raw_path:
                 raw_path.write_text(response2)
-            raise ValueError("LLM response unparseable after retry") from exc
+            raise ValueError(
+                f"LLM response unparseable after retry"
+                + (f" (saved to {raw_path})" if raw_path else "")
+            ) from exc
 
 
 def _build_mapping_result(data: dict) -> MappingResult:
