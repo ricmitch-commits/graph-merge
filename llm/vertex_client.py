@@ -27,7 +27,10 @@ class VertexClient:
 
     def _complete_claude(self, prompt: str, project: str | None, location: str) -> str:
         from anthropic import AnthropicVertex
-        client = AnthropicVertex(project_id=project, region=location)
+        kwargs = {"region": location}
+        if project:
+            kwargs["project_id"] = project
+        client = AnthropicVertex(**kwargs)
         message = client.messages.create(
             model=self._model_id,
             max_tokens=4096,
