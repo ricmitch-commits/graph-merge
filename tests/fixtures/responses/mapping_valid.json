@@ -1,0 +1,16 @@
+{
+  "mappings": [
+    {
+      "source_change": {"node_id": "src/auth.py::validate_token", "type": "node_modified"},
+      "destination_node": {"file": "internal/auth/service.go", "symbol": "ValidateToken"},
+      "confidence": "high",
+      "rationale": "Same role in call graph — validates token before DB access"
+    }
+  ],
+  "unmappable": [
+    {
+      "source_change": {"node_id": "src/auth.py::TokenCache"},
+      "reason": "No structural equivalent found in destination graph"
+    }
+  ]
+}
