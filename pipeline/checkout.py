@@ -63,7 +63,8 @@ def _ensure_local(repo: str, clone_target: Path) -> Path:
 
 
 def _add_worktree(repo: Path, path: Path, ref: str) -> None:
+    # path must be absolute — git -C changes cwd so relative paths resolve wrongly
     subprocess.run(
-        ["git", "-C", str(repo), "worktree", "add", str(path), ref],
+        ["git", "-C", str(repo), "worktree", "add", str(path.resolve()), ref],
         check=True, capture_output=True,
     )
