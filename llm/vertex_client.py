@@ -1,3 +1,6 @@
+import os
+
+
 class VertexClient:
     """Google Vertex AI client supporting both Gemini and Claude models.
 
@@ -5,8 +8,10 @@ class VertexClient:
     GOOGLE_APPLICATION_CREDENTIALS to a service account key file.
 
     Environment variables:
-      VERTEX_PROJECT_ID   - GCP project ID (required)
-      VERTEX_REGION  - GCP region (default: us-central1)
+      VERTEX_PROJECT_ID            - GCP project ID (required)
+      VERTEX_REGION                - GCP region
+      CLOUD_ML_REGION              - Anthropic SDK native region env var (fallback)
+      ANTHROPIC_VERTEX_PROJECT_ID  - Anthropic SDK native project env var (fallback)
 
     Model routing:
       vertex/gemini-*  → vertexai.generative_models.GenerativeModel
@@ -17,17 +22,22 @@ class VertexClient:
         self._model_id = model_id
 
     def complete(self, prompt: str) -> str:
-        import os
         project = os.environ.get("VERTEX_PROJECT_ID")
-        location = os.environ.get("VERTEX_REGION", "us-central1")
+        # Support both our env var and the Anthropic SDK's native one
+        region = (
+            os.environ.get("VERTEX_REGION")
+            or os.environ.get("CLOUD_ML_REGION")
+            or "us-central1"
+        )
+        print(f"[vertex] region={region!r} project={project!r} model={self._model_id!r}")
 
         if self._model_id.startswith("claude"):
-            return self._complete_claude(prompt, project, location)
-        return self._complete_gemini(prompt, project, location)
+            return self._complete_claude(prompt, project, region)
+        return self._complete_gemini(prompt, project, region)
 
-    def _complete_claude(self, prompt: str, project: str | None, location: str) -> str:
+    def _complete_claude(self, prompt: str, project: str | None, region: str) -> str:
         from anthropic import AnthropicVertex
-        kwargs = {"region": location}
+        kwargs: dict = {"region": region}
         if project:
             kwargs["project_id"] = project
         client = AnthropicVertex(**kwargs)
@@ -38,10 +48,10 @@ class VertexClient:
         )
         return message.content[0].text
 
-    def _complete_gemini(self, prompt: str, project: str | None, location: str) -> str:
+    def _complete_gemini(self, prompt: str, project: str | None, region: str) -> str:
         import vertexai
         from vertexai.generative_models import GenerativeModel
-        vertexai.init(project=project, location=location)
+        vertexai.init(project=project, location=region)
         model = GenerativeModel(self._model_id)
         response = model.generate_content(prompt)
         return response.text
